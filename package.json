@@ -1,0 +1,15 @@
+{
+  "name": "rotom",
+  "version": "1.0.0",
+  "description": "an ai harness module ",
+  "keywords": [
+    "ai"
+  ],
+  "license": "MIT",
+  "author": "biscuit",
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  }
+}

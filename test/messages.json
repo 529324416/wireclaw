@@ -1,0 +1,97 @@
+[
+  {
+    "role": "system",
+    "content": "You are a helpful assistant.",
+    "isCompressed": false,
+    "status": "completed"
+  },
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "text",
+        "text": "Please review this file."
+      },
+      {
+        "type": "attachment",
+        "attachment": {
+          "id": "sha256:user-file-001"
+        }
+      }
+    ],
+    "isCompressed": false,
+    "status": "completed"
+  },
+  {
+    "role": "assistant",
+    "content": "I will inspect the attachment.",
+    "isCompressed": false,
+    "status": "completed",
+    "stopReason": "tool_call",
+    "thinking": "I need to read the attached file first.",
+    "usage": {
+      "promptTokens": 120,
+      "completionTokens": 45,
+      "totalTokens": 165
+    },
+    "toolCalls": [
+      {
+        "id": "call-001",
+        "name": "read_attachment",
+        "params": {
+          "attachmentId": "sha256:user-file-001",
+          "maxBytes": 4096
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": [
+      {
+        "type": "text",
+        "text": "Attachment read successfully."
+      },
+      {
+        "type": "attachment",
+        "attachment": {
+          "id": "sha256:tool-output-001"
+        }
+      }
+    ],
+    "isCompressed": false,
+    "status": "completed",
+    "toolName": "read_attachment",
+    "callId": "call-001",
+    "details": {
+      "isSuccess": true,
+      "duration": 42
+    }
+  },
+  {
+    "role": "assistant",
+    "content": "The file contains three sections.",
+    "isCompressed": false,
+    "status": "completed",
+    "stopReason": "stop",
+    "usage": {
+      "promptTokens": 200,
+      "completionTokens": 80,
+      "totalTokens": 280
+    },
+    "toolCalls": []
+  },
+  {
+    "role": "assistant",
+    "content": "Partial response before failure.",
+    "isCompressed": true,
+    "status": "failed",
+    "failureReason": "internal_error",
+    "usage": {
+      "promptTokens": 10,
+      "completionTokens": 2,
+      "totalTokens": 12
+    },
+    "toolCalls": []
+  }
+]
