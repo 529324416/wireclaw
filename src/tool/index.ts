@@ -4,6 +4,4 @@
  */
 
 export * from "./local";
-
-// MCP 实现落地后再导出：
-// export * from "./mcp";
+export * from "./mcp";

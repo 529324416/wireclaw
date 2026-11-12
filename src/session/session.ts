@@ -19,6 +19,7 @@ import type {
     ToolCall,
     ToolCallResult,
     ToolDefinition,
+    ToolProgress,
 } from "./type";
 import type { ToolRegistry } from "./tool";
 
@@ -182,7 +183,10 @@ export class Run{
     private _pendingMessages: Message[];
     private _pendingUsage: ChatUsage;
     private _step: number;
-    
+
+    /** 本次运行中各工具调用的最新进度 */
+    private readonly _toolProgress: Map<string, ToolProgress> = new Map();
+
     private _startAt: Date;
     private _endAt?: Date;
     private _stopReason?: ChatStopReason;
@@ -256,6 +260,16 @@ export class Run{
         return this._step;
     }
 
+    /** 记录工具进度 */
+    setToolProgress(progress: ToolProgress): void{
+        this._toolProgress.set(progress.callId, progress);
+    }
+
+    /** 获取某个工具调用的最新进度 */
+    getToolProgress(callId: string): ToolProgress | undefined{
+        return this._toolProgress.get(callId);
+    }
+
     /** 进入 aborting 状态 */
     markAborting(): void{
         if (this.isStopped) return;
@@ -301,6 +315,15 @@ export const DEFAULT_MAX_STEPS = 16;
 /** 默认工具并发上限（1 = 顺序执行） */
 export const DEFAULT_TOOL_CONCURRENCY = 1;
 
+/** 工具进度事件默认延迟（5s 后才向前端推送） */
+export const DEFAULT_TOOL_PROGRESS_DELAY_MS = 5_000;
+
+/** 工具调用默认超时（毫秒） */
+export const DEFAULT_TOOL_TIMEOUT_MS = 30_000;
+
+/** 工具调用允许的最大超时（毫秒） */
+export const MAX_TOOL_TIMEOUT_MS = 3_600_000;
+
 /** 默认会话权限：审批类工具需要人工确认 */
 export const DEFAULT_SESSION_PERMISSION = SessionPermission.Approval;
 
@@ -337,6 +360,9 @@ export type RunOptions = {
 
     /** 本次运行的权限等级，默认 DEFAULT_SESSION_PERMISSION */
     permission?: SessionPermission;
+
+    /** 工具进度事件延迟（毫秒），默认 DEFAULT_TOOL_PROGRESS_DELAY_MS */
+    toolProgressDelayMs?: number;
 };
 
 /** 运行上下文 */
@@ -371,6 +397,9 @@ export type RunContext = {
 
     /** 本次运行的权限等级 */
     permission: SessionPermission;
+
+    /** 工具进度事件延迟（毫秒） */
+    toolProgressDelayMs: number;
 
     /** 请求人工审批；返回 abort 表示运行已取消 */
     requestApproval: (request: ToolApprovalRequest) => Promise<ToolApprovalResult>;
@@ -531,7 +560,7 @@ export class RunEngine{
             && calls.length > 1
             && ctx.toolConcurrency > 1
             && allConcurrencySafe){
-            await this._runToolsConcurrently(ctx, toolkit, calls);
+            await this._runToolsConcurrently(ctx, toolkit, calls, definitions);
             return;
         }
 
@@ -562,6 +591,7 @@ export class RunEngine{
         ctx: RunContext,
         toolkit: ToolSource,
         calls: readonly ToolCall[],
+        definitions: readonly (ToolDefinition | null)[],
     ): Promise<void>{
         const results: (ToolCallResult | undefined)[] = new Array(calls.length).fill(undefined);
         let cursor = 0;
@@ -573,8 +603,14 @@ export class RunEngine{
                 if (index >= calls.length) return;
 
                 const call = calls[index];
+                const startedAt = Date.now();
                 ctx.emit({ type: SessionEventType.TOOL_CALL_START, call });
-                results[index] = await toolkit.invoke(call, { signal: ctx.signal });
+                results[index] = await toolkit.invoke(call, {
+                    signal: ctx.signal,
+                    timeoutMs: resolveToolTimeout(definitions[index] ?? null),
+                    progressToken: call.id,
+                    onProgress: this._createProgressHandler(ctx, call, startedAt),
+                });
             }
         };
 
@@ -637,7 +673,33 @@ export class RunEngine{
             });
         }
 
-        return await toolkit.invoke(call, { signal: ctx.signal });
+        const startedAt = Date.now();
+        return await toolkit.invoke(call, {
+            signal: ctx.signal,
+            timeoutMs: resolveToolTimeout(definition),
+            progressToken: call.id,
+            onProgress: this._createProgressHandler(ctx, call, startedAt),
+        });
+    }
+
+    /** 生成进度回调：先存储最新值，超过延迟阈值再向前端发事件 */
+    private _createProgressHandler(
+        ctx: RunContext,
+        call: ToolCall,
+        startedAt: number,
+    ): (progress: ToolProgress) => void{
+        return (progress) => {
+            const normalized: ToolProgress = { ...progress, callId: call.id };
+            ctx.run.setToolProgress(normalized);
+
+            if (Date.now() - startedAt >= ctx.toolProgressDelayMs){
+                ctx.emit({
+                    type: SessionEventType.TOOL_PROGRESS,
+                    call,
+                    progress: normalized,
+                });
+            }
+        };
     }
 
     /** 取消运行；当前阶段只依赖外部 AbortSignal */
@@ -695,6 +757,11 @@ export class Session{
     /** 当前待审批的工具调用；null 表示没有 */
     get pendingApproval(): ToolApprovalRequest | null{
         return this._approval?.request ?? null;
+    }
+
+    /** 获取当前运行中某次工具调用的最新进度 */
+    getToolProgress(callId: string): ToolProgress | undefined{
+        return this._activeRun?.getToolProgress(callId);
     }
 
     /** 会话状态由 activeRun/RunStatus 派生，不单独保存一份状态 */
@@ -820,6 +887,14 @@ export class Session{
             );
         }
 
+        const toolProgressDelayMs = options.toolProgressDelayMs ?? DEFAULT_TOOL_PROGRESS_DELAY_MS;
+        if (!Number.isFinite(toolProgressDelayMs) || toolProgressDelayMs < 0){
+            throw new SessionError(
+                SessionErrorType.InvalidRequest,
+                `toolProgressDelayMs must be a non-negative number, got ${String(options.toolProgressDelayMs)}`,
+            );
+        }
+
         const history = this._currentSession;
         const llm = this._llm;
         const inputMessage = user(input);
@@ -845,6 +920,7 @@ export class Session{
             maxSteps,
             toolConcurrency,
             permission,
+            toolProgressDelayMs,
             requestApproval: (request) => this._requestApproval(request),
         };
 
@@ -934,6 +1010,15 @@ export class Session{
             }
         }
     }
+}
+
+/** 计算工具调用超时：工具建议值优先，默认 30s，上限 1h */
+function resolveToolTimeout(definition: ToolDefinition | null): number{
+    const configured = definition?.adviceTimeout;
+    if (configured === undefined || !Number.isFinite(configured) || configured <= 0){
+        return DEFAULT_TOOL_TIMEOUT_MS;
+    }
+    return Math.min(Math.floor(configured), MAX_TOOL_TIMEOUT_MS);
 }
 
 /** 把工具错误包装成工具调用结果 */

@@ -4,7 +4,7 @@ import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
 import { OllamaLLMProvider } from "./src/platform/index";
-import { LocalToolProvider } from "./src/tool/index";
+import { createMcpProvider, LocalToolProvider } from "./src/tool/index";
 import {
     DEFAULT_SESSION_PERMISSION,
     RunStatus,
@@ -24,13 +24,17 @@ import type { SessionEvent, SessionRuntimeOptions } from "./src/session/type";
  *   npx tsx client.ts
  *
  * 环境变量：
- *   OLLAMA_BASE_URL  默认 http://127.0.0.1:11434
- *   OLLAMA_MODEL     不填时优先选择 qwen3.5 9b，否则选择第一个支持 completion 的非 embedding 模型
+ *   OLLAMA_BASE_URL    默认 http://127.0.0.1:11434
+ *   OLLAMA_MODEL       不填时优先选择 qwen3.5 9b，否则选择第一个支持 completion 的非 embedding 模型
+ *   ROTOM_MCP_URL      默认 http://127.0.0.1:5000/mcp
+ *   ROTOM_MCP_ID       MCP 工具名前缀，默认 mcp
+ *   ROTOM_MCP_DISABLE  设为 1 时不注册 MCP Provider
  *
  * 命令：
  *   /exit                                退出
  *   /model <model-name>                  切换模型
  *   /list_models                         列出所有可用模型及其能力
+ *   /tools                               列出当前可用的工具（含 MCP）
  *   /permission [readonly|approval|full] 查看/切换会话权限等级
  *   /save_session [path]                 保存当前会话数据（默认 ./rotom-session.json）
  *   /restore_session [path]              读取会话数据并覆盖当前会话（会丢弃当前数据）
@@ -38,6 +42,9 @@ import type { SessionEvent, SessionRuntimeOptions } from "./src/session/type";
 
 const BASE_URL = process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434";
 const DEFAULT_SESSION_PATH = "./rotom-session.json";
+const MCP_URL = process.env.ROTOM_MCP_URL ?? "http://127.0.0.1:5000/mcp";
+const MCP_ID = process.env.ROTOM_MCP_ID ?? "mcp";
+const MCP_DISABLED = process.env.ROTOM_MCP_DISABLE === "1";
 
 type ApprovalEvent = Extract<
     SessionEvent,
@@ -115,8 +122,21 @@ async function main(): Promise<void> {
     };
     const session = new Session(provider, history, runtimeOptions);
 
-    const registry = new ToolRegistry();
+    const registry = new ToolRegistry({
+        onProviderError: (providerId, error) => {
+            process.stderr.write(`\n[provider:${providerId}] ${errorMessage(error)}\n`);
+        },
+    });
     registry.registerProvider(new LocalToolProvider(process.cwd(), { id: "local" }));
+
+    if (!MCP_DISABLED) {
+        registry.registerProvider(createMcpProvider({
+            id: MCP_ID,
+            name: "MCP",
+            transport: { type: "http", url: MCP_URL },
+        }));
+    }
+
     const workspace = process.cwd();
 
     let permission: SessionPermission = DEFAULT_SESSION_PERMISSION;
@@ -200,6 +220,15 @@ async function main(): Promise<void> {
                 void askApproval(event);
                 break;
 
+            case SessionEventType.TOOL_PROGRESS:
+                process.stdout.write(
+                    `\n[progress] ${event.call.name} ${event.progress.progress}`
+                    + (event.progress.total !== undefined ? `/${event.progress.total}` : "")
+                    + (event.progress.message !== undefined ? ` ${event.progress.message}` : "")
+                    + "\n",
+                );
+                break;
+
             case SessionEventType.TOOL_PERMISSION_WARNING:
                 process.stdout.write(`\n[warning] ${event.message}\n`);
                 break;
@@ -226,7 +255,6 @@ async function main(): Promise<void> {
 
         process.stdout.write("\nbye\n");
         rl.close();
-        process.exit(0);
     });
 
     console.log("Rotom Ollama console");
@@ -234,7 +262,8 @@ async function main(): Promise<void> {
     console.log(`model:      ${currentModel}`);
     console.log(`permission: ${permission}`);
     console.log(`workspace:  ${workspace}`);
-    console.log("commands:   /exit, /model <name>, /list_models, /permission [readonly|approval|full]");
+    console.log(`mcp:        ${MCP_DISABLED ? "disabled" : MCP_URL}`);
+    console.log("commands:   /exit, /model <name>, /list_models, /tools, /permission [readonly|approval|full]");
     console.log("            /save_session [path], /restore_session [path]");
     console.log("note:       /restore_session 会丢弃当前会话数据");
     console.log("");
@@ -313,6 +342,24 @@ async function main(): Promise<void> {
                     continue;
                 }
 
+                if (command === "tools") {
+                    try {
+                        const tools = await registry.listTools();
+                        console.log(`available tools (${tools.length}):`);
+                        for (const tool of tools) {
+                            const marks: string[] = [];
+                            if (tool.annotations?.readOnlyHint === true) marks.push("readonly");
+                            if (tool.annotations?.requiresApproval === true) marks.push("approval");
+                            if (tool.annotations?.concurrencySafe === true) marks.push("concurrent");
+                            const suffix = marks.length > 0 ? ` [${marks.join(", ")}]` : "";
+                            console.log(`  - ${tool.name} (${tool.source.providerId})${suffix}`);
+                        }
+                    } catch (error) {
+                        console.error(`[tools] ${errorMessage(error)}`);
+                    }
+                    continue;
+                }
+
                 if (command === "save_session" || command === "save") {
                     const rawPath = args.join(" ").trim();
                     const target = resolve(process.cwd(), rawPath.length > 0 ? rawPath : DEFAULT_SESSION_PATH);
@@ -379,6 +426,7 @@ async function main(): Promise<void> {
         }
     } finally {
         rl.close();
+        await registry.closeAll();
     }
 }
 

@@ -1,11 +1,14 @@
 import { InvalidParameterError } from "../base";
 import { isToolError, ToolError, ToolErrorType } from "./error";
 import type {
+    ContentPart,
+    MessageContent,
     ToolCall,
     ToolCallResult,
     ToolDefinition,
     ToolDefinitionSource,
     ToolParamSchema,
+    ToolProgress,
 } from "./type";
 
 /* ---------------------------------------------------------------------------
@@ -28,6 +31,12 @@ const MAX_PARAM_PROBLEMS = 8;
 export type ToolCallOptions = {
     /** 取消信号；Provider 必须响应并尽快结束 */
     signal?: AbortSignal;
+
+    /** 进度令牌（支持进度的 Provider 透传给远端） */
+    progressToken?: string | number;
+
+    /** 进度回调 */
+    onProgress?: (progress: ToolProgress) => void;
 };
 
 /** 调用工具时的选项，取消与超时由 ToolRegistry 统一处理 */
@@ -37,6 +46,12 @@ export type ToolInvokeOptions = {
 
     /** 超时时间（毫秒）；不传时不做主动超时 */
     timeoutMs?: number;
+
+    /** 进度令牌 */
+    progressToken?: string | number;
+
+    /** 进度回调 */
+    onProgress?: (progress: ToolProgress) => void;
 };
 
 /** 已由 ToolRegistry 拼装完成的工具定义（名称带前缀，source 必有值） */
@@ -44,10 +59,19 @@ export type RegisteredTool = ToolDefinition & {
     source: ToolDefinitionSource;
 };
 
+/** 工具结果默认上限：32 KiB 字符 */
+export const DEFAULT_MAX_TOOL_RESULT_CHARS = 32 * 1024;
+
 /** ToolRegistry 选项 */
 export type ToolRegistryOptions = {
     /** 单个 Provider 失败时的回调；失败不会影响其它 Provider */
     onProviderError?: (providerId: string, error: unknown) => void;
+
+    /** 单次工具结果的最大字符数；<= 0 表示不限制。默认 32 KiB */
+    maxResultChars?: number;
+
+    /** 工具列表缓存 TTL（毫秒）；<= 0 表示不自动过期。默认 0 */
+    toolCacheTtlMs?: number;
 };
 
 
@@ -73,6 +97,14 @@ export interface ToolProvider {
      * @param options 调用选项；Provider 必须响应 options.signal
      */
     call(call: ToolCall, options?: ToolCallOptions): Promise<ToolCallResult>;
+
+    /** 关闭提供者并释放资源（可选；由 ToolRegistry.closeAll 调用） */
+    close?(): Promise<void>;
+
+    /** 订阅“工具列表已变化”（可选）
+     * @returns 取消订阅函数
+     */
+    onToolsChanged?(listener: () => void): () => void;
 }
 
 
@@ -108,6 +140,15 @@ export class ToolRegistry {
     /** 单 Provider 失败回调 */
     private readonly _onProviderError?: (providerId: string, error: unknown) => void;
 
+    /** 工具结果字符上限 */
+    private readonly _maxResultChars: number;
+
+    /** 工具列表缓存 TTL */
+    private readonly _toolCacheTtlMs: number;
+
+    /** 工具列表缓存时间 */
+    private _toolsCachedAt: number | null = null;
+
     /** 已拼装的工具定义缓存 */
     private _tools: RegisteredTool[] | null = null;
 
@@ -117,8 +158,13 @@ export class ToolRegistry {
     /** 缓存代次；注册/注销/手动失效时自增，防止过期结果写回缓存 */
     private _generation = 0;
 
+    /** 各 Provider 的工具变更订阅 */
+    private readonly _toolChangeUnsubscribes: Map<string, () => void> = new Map();
+
     constructor(options: ToolRegistryOptions = {}) {
         this._onProviderError = options.onProviderError;
+        this._maxResultChars = options.maxResultChars ?? DEFAULT_MAX_TOOL_RESULT_CHARS;
+        this._toolCacheTtlMs = options.toolCacheTtlMs ?? 0;
     }
 
     /** 注册工具提供者
@@ -133,6 +179,7 @@ export class ToolRegistry {
         if (this._providers.has(provider.id) && !force) return false;
 
         this._providers.set(provider.id, provider);
+        this._watchProvider(provider);
         this.invalidateTools();
         return true;
     }
@@ -145,6 +192,7 @@ export class ToolRegistry {
         const providerId = typeof provider === "string" ? provider : provider.id;
         if (!this._providers.delete(providerId)) return false;
 
+        this._unwatchProvider(providerId);
         this.invalidateTools();
         return true;
     }
@@ -153,7 +201,52 @@ export class ToolRegistry {
     invalidateTools(): void {
         this._generation += 1;
         this._tools = null;
+        this._toolsCachedAt = null;
         this._pendingTools = null;
+    }
+
+    /** 关闭所有 Provider 并清空注册表（用于程序退出） */
+    async closeAll(): Promise<void> {
+        const providers = [...this._providers.values()];
+
+        for (const provider of providers) {
+            this._unwatchProvider(provider.id);
+        }
+        this._providers.clear();
+        this.invalidateTools();
+
+        for (const provider of providers) {
+            if (provider.close === undefined) continue;
+            try {
+                await provider.close();
+            } catch {
+                // 单个 Provider 关闭失败不影响其它 Provider
+            }
+        }
+    }
+
+    /** 订阅 Provider 的工具变更，并让缓存失效 */
+    private _watchProvider(provider: ToolProvider): void {
+        this._unwatchProvider(provider.id);
+        if (provider.onToolsChanged === undefined) return;
+
+        const unsubscribe = provider.onToolsChanged(() => {
+            this.invalidateTools();
+        });
+        this._toolChangeUnsubscribes.set(provider.id, unsubscribe);
+    }
+
+    /** 取消 Provider 的工具变更订阅 */
+    private _unwatchProvider(providerId: string): void {
+        const unsubscribe = this._toolChangeUnsubscribes.get(providerId);
+        if (unsubscribe === undefined) return;
+
+        this._toolChangeUnsubscribes.delete(providerId);
+        try {
+            unsubscribe();
+        } catch {
+            // 忽略取消订阅异常
+        }
     }
 
     /** 列出所有可用工具（已拼装名称、已填充 source）
@@ -162,7 +255,10 @@ export class ToolRegistry {
      * @note 结果会被缓存；并发调用会合并为一次拉取
      */
     async listTools(signal?: AbortSignal): Promise<RegisteredTool[]> {
-        if (this._tools !== null) return this._copyTools(this._tools);
+        if (this._tools !== null) {
+            if (!this._isToolCacheExpired()) return this._copyTools(this._tools);
+            this.invalidateTools();
+        }
         if (this._pendingTools !== null) return this._copyTools(await this._pendingTools);
         if (signal?.aborted === true) return [];
 
@@ -249,14 +345,12 @@ export class ToolRegistry {
             };
 
             try {
-                const result = await raceWithAbort(provider.call(providerCall, { signal }), signal);
-                return {
-                    ...result,
-                    status: {
-                        ...result.status,
-                        duration: elapsed(),
-                    },
-                };
+                const result = await raceWithAbort(provider.call(providerCall, {
+                    signal,
+                    progressToken: options.progressToken,
+                    onProgress: options.onProgress,
+                }), signal);
+                return this._finalizeResult(result, definition, elapsed());
             } catch (error) {
                 if (isSignalAborted(signal)) {
                     return this._toErrorResult(this._abortOrTimeout(options, timeout.signal), elapsed());
@@ -276,6 +370,94 @@ export class ToolRegistry {
         }
     }
 
+    /** 统一处理 Provider 结果：时长、文本截断、outputSchema 校验 */
+    private _finalizeResult(
+        result: ToolCallResult,
+        definition: ToolDefinition | null,
+        durationMs: number,
+    ): ToolCallResult {
+        const normalized: ToolCallResult = {
+            ...result,
+            content: this._truncateContent(result.content),
+            status: {
+                ...result.status,
+                duration: durationMs,
+            },
+        };
+
+        if (definition?.outputSchema === undefined
+            || normalized.status.isSuccess === false
+            || normalized.structuredContent === undefined) {
+            return normalized;
+        }
+
+        const problems = validateToolParams(definition.outputSchema, normalized.structuredContent);
+        if (problems.length === 0) return normalized;
+
+        const error = new ToolError(
+            ToolErrorType.ProviderError,
+            false,
+            `Tool result does not match outputSchema: ${problems.join("; ")}`,
+        );
+
+        return {
+            content: error.message,
+            status: {
+                isSuccess: false,
+                error,
+                duration: durationMs,
+            },
+            structuredContent: undefined,
+            raw: normalized.raw,
+        };
+    }
+
+    /** 按 Registry 上限截断工具结果文本（保留附件引用） */
+    private _truncateContent(content: MessageContent): MessageContent {
+        const limit = this._maxResultChars;
+        if (limit <= 0) return content;
+
+        if (typeof content === "string") {
+            return truncateText(content, limit);
+        }
+
+        let remaining = limit;
+        let truncated = false;
+        const parts: ContentPart[] = [];
+
+        for (const part of content) {
+            if (part.type === "attachment") {
+                parts.push(part);
+                continue;
+            }
+            if (remaining <= 0) {
+                truncated = true;
+                break;
+            }
+            if (part.text.length <= remaining) {
+                parts.push(part);
+                remaining -= part.text.length;
+            } else {
+                parts.push({ type: "text", text: part.text.slice(0, remaining) });
+                remaining = 0;
+                truncated = true;
+            }
+        }
+
+        if (truncated) {
+            parts.push({ type: "text", text: "\n\n[... result truncated ...]" });
+        }
+
+        return parts;
+    }
+
+    /** 工具列表缓存是否已过期 */
+    private _isToolCacheExpired(): boolean {
+        if (this._toolCacheTtlMs <= 0) return false;
+        if (this._toolsCachedAt === null) return false;
+        return Date.now() - this._toolsCachedAt >= this._toolCacheTtlMs;
+    }
+
     /** 拉取并拼装所有 Provider 的工具定义 */
     private async _fetchTools(
         signal: AbortSignal | undefined,
@@ -283,7 +465,10 @@ export class ToolRegistry {
     ): Promise<RegisteredTool[]> {
         const providers = [...this._providers.values()];
         if (providers.length === 0) {
-            if (generation === this._generation) this._tools = [];
+            if (generation === this._generation) {
+                this._tools = [];
+                this._toolsCachedAt = Date.now();
+            }
             return [];
         }
 
@@ -343,6 +528,7 @@ export class ToolRegistry {
         if (generation === this._generation) {
             // 所有 Provider 都失败时不写缓存，方便下次重试
             this._tools = succeeded > 0 ? tools : null;
+            this._toolsCachedAt = this._tools === null ? null : Date.now();
         }
 
         return tools;
@@ -587,6 +773,12 @@ function formatJson(value: unknown): string {
 
 function formatParamProblems(toolName: string, problems: readonly string[]): string {
     return `Invalid parameters for tool "${toolName}": ${problems.join("; ")}`;
+}
+
+/** 截断文本并追加提示 */
+function truncateText(text: string, limit: number): string {
+    if (text.length <= limit) return text;
+    return `${text.slice(0, limit)}\n\n[... truncated: ${text.length - limit} chars omitted ...]`;
 }
 
 

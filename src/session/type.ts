@@ -64,6 +64,25 @@ export type ToolCallStatusData = {
     error?: ToolErrorData;
 };
 
+/** 工具调用进度（由支持进度的工具主动上报） */
+export type ToolProgress = {
+
+    /** 对应的工具调用 ID */
+    callId: string;
+
+    /** 当前进度值 */
+    progress: number;
+
+    /** 总量（可选） */
+    total?: number;
+
+    /** 进度消息（可选） */
+    message?: string;
+
+    /** 最后更新时间（毫秒时间戳） */
+    updatedAt: number;
+};
+
 /** 工具调用结果 */
 export type ToolCallResult = {
 
@@ -193,6 +212,9 @@ export const SessionEventType = {
     /** 工具调用结束 */
     TOOL_CALL_END: 'tool_call_end',
 
+    /** 工具调用进度（超过延迟阈值后才会发出） */
+    TOOL_PROGRESS: 'tool_progress',
+
     /** 工具调用需要人工审批（会话进入暂停状态） */
     TOOL_APPROVAL_REQUIRED: 'tool_approval_required',
 
@@ -228,6 +250,7 @@ export type SessionEvent =
     // 工具调用类消息
     | { type: typeof SessionEventType.TOOL_CALL_START, call: ToolCall }
     | { type: typeof SessionEventType.TOOL_CALL_END, call: ToolCall, result: ToolCallResult }
+    | { type: typeof SessionEventType.TOOL_PROGRESS, call: ToolCall, progress: ToolProgress }
     | { type: typeof SessionEventType.TOOL_APPROVAL_REQUIRED, call: ToolCall, tool: ToolDefinition | null }
     | { type: typeof SessionEventType.TOOL_PERMISSION_WARNING, call: ToolCall, tool: ToolDefinition | null, message: string }
 
@@ -364,6 +387,12 @@ export type ToolDefinition = {
     description: string;
     inputSchema: ToolParamSchema;      // 模型看到的参数 schema
     outputSchema?: ToolParamSchema;
+
+    /** 建议的单次调用超时（毫秒）
+     * @note 未设置时 Session 使用默认 30s；超过 1h 会被截断
+     */
+    adviceTimeout?: number;
+
     annotations?: {
         readOnlyHint?: boolean;
         destructiveHint?: boolean;
