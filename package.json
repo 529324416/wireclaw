@@ -17,7 +17,9 @@
     "node": ">=20.3.0"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.browser.json",
+    "typecheck:node": "tsc --noEmit",
+    "typecheck:browser": "tsc --noEmit -p tsconfig.browser.json"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

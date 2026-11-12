@@ -1,8 +1,11 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, extname, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
+import { sanitizePathInput } from "./src/base";
+import { detectImageMimeType } from "./src/file";
+import { LocalFileHost } from "./src/file/local";
 import { OllamaLLMProvider } from "./src/platform/index";
 import { createMcpProvider, LocalToolProvider } from "./src/tool/index";
 import {
@@ -42,6 +45,7 @@ import type {
  *   /list_models                         列出所有可用模型及其能力
  *   /tools                               列出当前可用的工具（含 MCP）
  *   /permission [readonly|approval|full] 查看/切换会话权限等级
+ *   /upload <image-path>                 追加一个图片附件（jpg/jpeg/png/webp/gif）
  *   /save_session [path]                 保存当前会话数据（默认 ./rotom-session.json）
  *   /restore_session [path]              读取会话数据并覆盖当前会话（会丢弃当前数据）
  */
@@ -51,6 +55,8 @@ const DEFAULT_SESSION_PATH = "./rotom-session.json";
 const MCP_URL = process.env.ROTOM_MCP_URL ?? "http://127.0.0.1:5000/mcp";
 const MCP_ID = process.env.ROTOM_MCP_ID ?? "mcp";
 const MCP_DISABLED = process.env.ROTOM_MCP_DISABLE === "1";
+const FILES_DIR = process.env.ROTOM_FILES_DIR ?? "./.rotom-files";
+const SUPPORTED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif"]);
 
 type ApprovalEvent = Extract<
     SessionEvent,
@@ -131,7 +137,8 @@ async function main(): Promise<void> {
         model,
         think: false,
     };
-    const session = new Session(provider, history, runtimeOptions);
+    const fileHost = new LocalFileHost(resolve(process.cwd(), FILES_DIR));
+    const session = new Session(provider, history, runtimeOptions, fileHost);
 
     const registry = new ToolRegistry({
         onProviderError: (providerId, error) => {
@@ -154,6 +161,7 @@ async function main(): Promise<void> {
     let currentModel = model;
     let outputStarted = false;
     let thinkingStarted = false;
+    let pendingAttachments: string[] = [];
 
     const rl = createInterface({ input, output });
 
@@ -337,9 +345,10 @@ async function main(): Promise<void> {
     console.log(`model:      ${currentModel}`);
     console.log(`permission: ${permission}`);
     console.log(`workspace:  ${workspace}`);
+    console.log(`files:      ${fileHost.rootDir}`);
     console.log(`mcp:        ${MCP_DISABLED ? "disabled" : MCP_URL}`);
     console.log("commands:   /exit, /model <name>, /list_models, /tools, /permission [readonly|approval|full]");
-    console.log("            /save_session [path], /restore_session [path]");
+    console.log("            /upload <image-path>, /save_session [path], /restore_session [path]");
     console.log("note:       /restore_session 会丢弃当前会话数据");
     console.log("");
 
@@ -435,8 +444,59 @@ async function main(): Promise<void> {
                     continue;
                 }
 
+                if (command === "upload") {
+                    if (session.isBusy) {
+                        console.log("[upload] cannot upload while running");
+                        continue;
+                    }
+
+                    const rawPath = sanitizePathInput(args.join(" "));
+                    if (rawPath.length === 0) {
+                        console.log("usage: /upload <image-path>");
+                        continue;
+                    }
+
+                    const target = resolve(process.cwd(), rawPath);
+                    const extension = extname(target).toLowerCase();
+                    if (!SUPPORTED_IMAGE_EXTENSIONS.has(extension)) {
+                        console.log(`[upload] unsupported image extension: ${extension || "(none)"}; supported: ${[...SUPPORTED_IMAGE_EXTENSIONS].join(", ")}`);
+                        continue;
+                    }
+
+                    try {
+                        try {
+                            const models = provider.modelProvider.availableModels
+                                ?? await provider.modelProvider.initModels();
+                            const modelInfo = models.find(item => item.id === currentModel || item.name === currentModel);
+                            if (modelInfo !== undefined && !modelInfo.isVisionModel) {
+                                console.log(`[upload] note: model "${currentModel}" is not marked as vision; switch model before sending`);
+                            }
+                        } catch (error) {
+                            console.log(`[upload] model capability check skipped: ${errorMessage(error)}`);
+                        }
+
+                        const bytes = new Uint8Array(await readFile(target));
+                        const mimeType = detectImageMimeType(bytes);
+                        if (mimeType === undefined) {
+                            console.log("[upload] file content is not a supported image");
+                            continue;
+                        }
+
+                        const file = await fileHost.put(basename(target), bytes, mimeType);
+                        if (!pendingAttachments.includes(file.contentHash)) {
+                            pendingAttachments.push(file.contentHash);
+                        }
+
+                        console.log(`[upload] ${file.name} (${mimeType}, ${file.size} bytes) hash=${file.contentHash}`);
+                        console.log(`[upload] pending attachments: ${pendingAttachments.length}`);
+                    } catch (error) {
+                        console.error(`[upload] ${errorMessage(error)}`);
+                    }
+                    continue;
+                }
+
                 if (command === "save_session" || command === "save") {
-                    const rawPath = args.join(" ").trim();
+                    const rawPath = sanitizePathInput(args.join(" "));
                     const target = resolve(process.cwd(), rawPath.length > 0 ? rawPath : DEFAULT_SESSION_PATH);
                     const history = session.history;
 
@@ -462,7 +522,7 @@ async function main(): Promise<void> {
                         continue;
                     }
 
-                    const rawPath = args.join(" ").trim();
+                    const rawPath = sanitizePathInput(args.join(" "));
                     const target = resolve(process.cwd(), rawPath.length > 0 ? rawPath : DEFAULT_SESSION_PATH);
 
                     try {
@@ -470,6 +530,7 @@ async function main(): Promise<void> {
                         const raw = (await readFile(target, "utf8")).replace(/^\uFEFF/, "");
                         const restored = SessionSerializer.deserialize(JSON.parse(raw) as unknown);
                         session.changeSession(restored);
+                        pendingAttachments = [];
                         console.log(`[restore_session] loaded ${restored.messages.length} messages from ${target}`);
                         console.log("[restore_session] current session data discarded");
                     } catch (error) {
@@ -484,7 +545,20 @@ async function main(): Promise<void> {
 
             console.log("");
             try {
-                const run = await session.run(userInput, { tools: registry, permission });
+                const attachments = pendingAttachments;
+                pendingAttachments = [];
+
+                const content = attachments.length === 0
+                    ? userInput
+                    : [
+                        { type: "text" as const, text: userInput },
+                        ...attachments.map(contentHash => ({
+                            type: "attachment" as const,
+                            attachment: { contentHash },
+                        })),
+                    ];
+
+                const run = await session.run(content, { tools: registry, permission });
 
                 if (run.status === RunStatus.Completed) {
                     process.stdout.write(

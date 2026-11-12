@@ -1,9 +1,10 @@
 {
   "$schema": "https://json.schemastore.org/tsconfig",
   "compilerOptions": {
-    /* 运行环境：Node >= 20 + tsx（源码直接执行，不产出构建物） */
+    /* 运行环境：ES2023 + Web 标准；共享代码同时面向浏览器与 Node >= 20。
+       Node 专用实现（local / MCP stdio / client.ts）仍通过 types: node 获得类型。 */
     "target": "ES2023",
-    "lib": ["ES2023"],
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "types": ["node"],

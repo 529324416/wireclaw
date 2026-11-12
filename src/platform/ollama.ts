@@ -1,14 +1,18 @@
-import { uniqueId } from "../base";
+import { toBase64, uniqueId } from "../base";
+import { detectImageMimeType } from "../file";
+import type { AttachmentFile } from "../file";
 import { SessionError, SessionErrorType } from "../session/error";
 import { AssistantMessage, ToolMessage } from "../session";
 import type { Message } from "../session";
-import { LLMProvider, ModelProvider, ProtocolAdapter } from "../session/protocol";
+import { CloudFileManager, LLMProvider, ModelProvider, ProtocolAdapter } from "../session/protocol";
 import type { ModelInfo } from "../session";
 import type {
+    AttachmentWireMap,
     ChatOptions,
     ChatResult,
     ChatUsage,
     MessageContent,
+    RemoteFileRef,
     SessionRuntimeOptions,
     StreamChunk,
     ToolCall,
@@ -23,6 +27,7 @@ type OllamaMessage = {
     role: string;
     content?: string;
     thinking?: string;
+    images?: string[];
     tool_calls?: unknown[];
     tool_name?: string;
     tool_call_id?: string;
@@ -51,20 +56,63 @@ function stringField(record: Record<string, unknown> | undefined, key: string): 
     return typeof value === "string" ? value : undefined;
 }
 
-function contentToText(content: MessageContent): string{
-    if (typeof content === "string") return content;
+type OllamaContent = {
+    text: string;
+    images: string[];
+};
+
+/** 把 Rotom 内容转换为 Ollama 的文本 + images(base64)
+ * @note Ollama 没有远端文件 ID，图片必须以 base64 放在消息的 images 字段中
+ */
+function contentToOllama(
+    content: MessageContent,
+    attachmentRefs?: AttachmentWireMap,
+): OllamaContent{
+    if (typeof content === "string") return { text: content, images: [] };
 
     const pieces: string[] = [];
+    const images: string[] = [];
+
     for (const part of content){
-        if (part.type === "attachment"){
+        if (part.type === "text"){
+            pieces.push(part.text);
+            continue;
+        }
+
+        if (attachmentRefs === undefined){
             throw new SessionError(
                 SessionErrorType.InvalidData,
-                "Ollama adapter does not support attachment content yet",
+                `Missing attachment wire map for "${part.attachment.contentHash}"`,
             );
         }
-        pieces.push(part.text);
+
+        const ref = attachmentRefs.get(part.attachment.contentHash);
+        if (ref === undefined){
+            throw new SessionError(
+                SessionErrorType.InvalidData,
+                `Attachment reference was not resolved: ${part.attachment.contentHash}`,
+            );
+        }
+
+        if (ref.kind !== "inline"){
+            throw new SessionError(
+                SessionErrorType.InvalidData,
+                `Ollama only supports inline attachments, got "${ref.kind}"`,
+            );
+        }
+
+        const mimeType = detectImageMimeType(ref.data);
+        if (mimeType === undefined){
+            throw new SessionError(
+                SessionErrorType.InvalidData,
+                `Ollama only supports image attachments, got "${ref.mimeType ?? "unknown"}"`,
+            );
+        }
+
+        images.push(toBase64(ref.data));
     }
-    return pieces.join("\n");
+
+    return { text: pieces.join("\n"), images };
 }
 
 function parseUsage(record: Record<string, unknown>): ChatUsage | undefined{
@@ -132,23 +180,32 @@ function parseToolCalls(value: unknown): ToolCall[]{
     });
 }
 
-/** Ollama 协议适配器：Rotom Message <-> Ollama chat message */
+/** Ollama 协议适配器：Rotom Message <-> Ollama chat message
+ * @note 图片附件按 Ollama 协议编码为 base64，并放入 user 消息的 images 数组
+ */
 export class OllamaProtocolAdapter extends ProtocolAdapter{
 
-    /** 将 Rotom Message 转成 Ollama chat message */
-    toPayload(msg: Message): OllamaMessage{
-        const content = contentToText(msg.content);
+    /** 将 Rotom Message 转成 Ollama chat message
+     * @note Ollama 的图片协议是 base64 inline；其他平台可能是 file_id / URL / data URL
+     */
+    toPayload(msg: Message, attachmentRefs?: AttachmentWireMap): OllamaMessage{
+        const { text, images } = contentToOllama(msg.content, attachmentRefs);
 
         switch (msg.role){
             case "system":
-                return { role: "system", content };
+                this._assertNoImages(msg.role, images);
+                return { role: "system", content: text };
 
-            case "user":
-                return { role: "user", content };
+            case "user": {
+                const payload: OllamaMessage = { role: "user", content: text };
+                if (images.length > 0) payload.images = images;
+                return payload;
+            }
 
             case "assistant": {
+                this._assertNoImages(msg.role, images);
                 const assistant = msg as AssistantMessage;
-                const payload: OllamaMessage = { role: "assistant", content };
+                const payload: OllamaMessage = { role: "assistant", content: text };
                 if (assistant.thinking !== undefined){
                     payload.thinking = assistant.thinking;
                 }
@@ -165,10 +222,11 @@ export class OllamaProtocolAdapter extends ProtocolAdapter{
             }
 
             case "tool": {
+                this._assertNoImages(msg.role, images);
                 const tool = msg as ToolMessage;
                 return {
                     role: "tool",
-                    content,
+                    content: text,
                     tool_name: tool.toolName,
                     tool_call_id: tool.callId,
                 };
@@ -180,6 +238,15 @@ export class OllamaProtocolAdapter extends ProtocolAdapter{
                     `Unsupported message role: ${msg.role}`,
                 );
         }
+    }
+
+    /** Ollama 只在 user 消息中接受 images；其他角色出现附件时显式失败 */
+    private _assertNoImages(role: string, images: readonly string[]): void{
+        if (images.length === 0) return;
+        throw new SessionError(
+            SessionErrorType.InvalidData,
+            `Ollama only supports images on user messages, got role "${role}"`,
+        );
     }
 
     /** 解析 Ollama 的完整响应 */
@@ -408,13 +475,38 @@ export class OllamaModelProvider extends ModelProvider{
     }
 }
 
-/** Ollama LLMProvider：整合 ModelProvider + ProtocolAdapter + /api/chat */
+/** Ollama 的 CloudFileManager：Ollama 没有文件上传协议，图片以 inline base64 发送
+ * @note 因此 ensureFile 只做图片校验并返回原始字节，不产生远端文件 ID / 过期时间
+ */
+export class OllamaCloudFileManager extends CloudFileManager{
+
+    async ensureFile(file: AttachmentFile, _signal?: AbortSignal): Promise<RemoteFileRef>{
+        const mimeType = detectImageMimeType(file.content);
+
+        if (mimeType === undefined){
+            throw new SessionError(
+                SessionErrorType.InvalidRequest,
+                `Ollama only supports image attachments, got "${file.mimeType ?? "unknown"}"`,
+            );
+        }
+
+        return {
+            kind: "inline",
+            data: file.content,
+            name: file.name,
+            mimeType,
+        };
+    }
+}
+
+/** Ollama LLMProvider：整合 ModelProvider + ProtocolAdapter + CloudFileManager + /api/chat */
 export class OllamaLLMProvider extends LLMProvider{
 
     private readonly _baseUrl: string;
     private readonly _headers: Record<string, string>;
     private readonly _modelProvider: OllamaModelProvider;
     private readonly _protocolAdapter: OllamaProtocolAdapter;
+    private readonly _cloudFileManager: OllamaCloudFileManager;
 
     constructor(
         baseUrl: string = "http://127.0.0.1:11434",
@@ -425,10 +517,12 @@ export class OllamaLLMProvider extends LLMProvider{
         this._headers = { ...headers };
         this._modelProvider = new OllamaModelProvider(this._baseUrl, this._headers);
         this._protocolAdapter = new OllamaProtocolAdapter();
+        this._cloudFileManager = new OllamaCloudFileManager();
     }
 
     get modelProvider(): OllamaModelProvider{ return this._modelProvider; }
     get protocolAdapter(): OllamaProtocolAdapter{ return this._protocolAdapter; }
+    override get cloudFileManager(): OllamaCloudFileManager{ return this._cloudFileManager; }
     get title(): string{ return "Ollama"; }
 
     override get supportsTools(): boolean{ return true; }
@@ -445,6 +539,18 @@ export class OllamaLLMProvider extends LLMProvider{
             );
         }
 
+        if (turn?.attachmentRefs !== undefined && turn.attachmentRefs.size > 0){
+            const model = this._modelProvider.availableModels?.find(
+                (item) => item.id === options.model || item.name === options.model,
+            );
+            if (model !== undefined && !model.isVisionModel){
+                throw new SessionError(
+                    SessionErrorType.InvalidRequest,
+                    `Ollama model "${options.model}" does not support image attachments`,
+                );
+            }
+        }
+
         const requestOptions: Record<string, unknown> = {};
         if (options.temperature !== undefined){
             requestOptions.temperature = options.temperature;
@@ -452,7 +558,7 @@ export class OllamaLLMProvider extends LLMProvider{
 
         const payload: Record<string, unknown> = {
             model: options.model,
-            messages: this._protocolAdapter.toPayloads([...messages]),
+            messages: this._protocolAdapter.toPayloads([...messages], turn?.attachmentRefs),
             stream: true,
         };
         if (Object.keys(requestOptions).length > 0){

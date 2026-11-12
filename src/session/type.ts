@@ -3,11 +3,11 @@
 import { ToolError, type ToolErrorType } from "./error";
 import type { AssistantMessage } from "./message";
 
-/** 附件引用 */
+/** 附件引用（只保存内容指纹，不保存文件名、路径或远端文件ID） */
 export type AttachmentRef = {
 
-    /** 附件ID */
-    id: string;
+    /** 内容指纹（SHA-256 小写十六进制） */
+    contentHash: string;
 }
 
 /** 消息内容部分 */
@@ -18,6 +18,37 @@ export type ContentPart =
 
 /** 消息内容部分(为了形成先后顺序) */
 export type MessageContent = string | ContentPart[];
+
+/** Provider 侧的附件表示
+ * - remote-id：已上传到当前平台，fileId 可用
+ * - inline：随请求内联，data 为原始字节，具体编码由 ProtocolAdapter 负责
+ * - url：平台可直接访问的 URL
+ * @note expiresAt 只是提示值，不能作为文件是否有效的唯一依据
+ */
+export type RemoteFileRef =
+    | {
+        kind: "remote-id";
+        fileId: string;
+        name?: string;
+        mimeType?: string;
+        expiresAt?: number;
+    }
+    | {
+        kind: "inline";
+        data: Uint8Array;
+        name?: string;
+        mimeType?: string;
+    }
+    | {
+        kind: "url";
+        url: string;
+        name?: string;
+        mimeType?: string;
+        expiresAt?: number;
+    };
+
+/** 内容指纹 -> 当前 Provider 可用的附件表示；由 Session 在发送前构造 */
+export type AttachmentWireMap = ReadonlyMap<string, RemoteFileRef>;
 
 /** 工具调用请求(记录AI的调用请求) */
 export type ToolCall = {
@@ -360,8 +391,8 @@ export type ChatResult = {
     raw?: unknown;               
 };
 
-export type ChatOptions = {
 
+export type ChatOptions = {
     /** 取消信号 */
     signal: AbortSignal;
 
@@ -370,6 +401,9 @@ export type ChatOptions = {
 
     /** 本轮可用的工具定义；不传或空数组表示不启用工具调用 */
     tools?: ToolDefinition[];
+
+    /** 本轮附件映射；由 Session 根据 IFileHost 和 CloudFileManager 解析后传入 */
+    attachmentRefs?: AttachmentWireMap;
 };
 
 /* ---- 流式解析单元 ---- */

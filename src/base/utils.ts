@@ -75,3 +75,37 @@ export function asEnum<T extends string>(value: unknown, allowed: readonly T[], 
     }
     return value as T;
 }
+
+/** 去掉路径中由剪贴板带入的不可见控制字符（Bidi / 零宽 / BOM）
+ * @note Windows 资源管理器复制路径时偶尔会带上 U+202A 等字符，
+ *       它们会让绝对路径被当成相对路径，最终拼到当前工作目录下。
+ */
+export function sanitizePathInput(value: string): string{
+    const invisible = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g;
+    let cleaned = value.replace(invisible, "").trim();
+
+    if (cleaned.length >= 2){
+        const first = cleaned[0];
+        const last = cleaned[cleaned.length - 1];
+        if ((first === '"' && last === '"') || (first === "'" && last === "'")){
+            cleaned = cleaned.slice(1, -1).trim();
+        }
+    }
+
+    return cleaned;
+}
+
+/** 把字节数组编码为 base64（不包含 data URL 前缀）
+ * @note 使用 btoa；Node >= 20 与浏览器均可用。分块拼接，避免大文件参数展开溢出
+ */
+export function toBase64(bytes: Uint8Array): string{
+    let binary = "";
+    const chunkSize = 0x8000;
+
+    for (let offset = 0; offset < bytes.length; offset += chunkSize){
+        const chunk = bytes.subarray(offset, offset + chunkSize);
+        binary += String.fromCharCode(...chunk);
+    }
+
+    return btoa(binary);
+}

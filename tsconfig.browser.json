@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    /* 浏览器/共享层检查：不加载 Node 全局类型，只依赖 ES2023 + Web 标准 */
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": []
+  },
+  "include": [
+    "src/base/**/*.ts",
+    "src/session/**/*.ts",
+    "src/file/**/*.ts",
+    "src/platform/**/*.ts"
+  ],
+  "exclude": ["node_modules", "dist", "test", "test.ts", "src/file/local.ts"]
+}

@@ -1,11 +1,24 @@
 /* Session模块协议定义 */
 
+import type { AttachmentFile } from "../file";
 import { handleSessionError } from "./error";
 import type { AssistantMessage, Message } from "./message";
-import type { SessionRuntimeOptions, ChatResult, ModelThinkingLevel, StreamChunk, ChatOptions, ToolDefinition } from "./type";
+import type {
+    AttachmentWireMap,
+    ChatOptions,
+    ChatResult,
+    ModelThinkingLevel,
+    RemoteFileRef,
+    SessionRuntimeOptions,
+    StreamChunk,
+    ToolDefinition,
+} from "./type";
 
 
-/** 协议适配器，描述不同平台的协议差异 */
+/** 协议适配器，描述不同平台的协议差异
+ * @note 附件必须由适配器按平台协议编码：Ollama 使用 images(base64)，OpenAI 可能使用
+ *       image_url/data URL/file_id，其他平台可能使用 URL。Session 只提供 RemoteFileRef 映射。
+ */
 export abstract class ProtocolAdapter{
 
     /** 转换工具定义列表为该平台的请求格式。
@@ -25,11 +38,12 @@ export abstract class ProtocolAdapter{
 
     /** 转换消息列表为该平台的请求格式 
      * @param msgs 要转换的消息列表
+     * @param attachmentRefs 内容指纹到 Provider 附件表示的映射
      * @returns 返回一个JSON对象数组，每个对象包含role和content字段
      * @note 默认使用单条消息的payload格式，如果目标平台的批量消息格式不同，需要覆写此方法
     */
-    toPayloads(msgs: Message[]): unknown{
-        return msgs.map(m => this.toPayload(m));
+    toPayloads(msgs: Message[], attachmentRefs?: AttachmentWireMap): unknown{
+        return msgs.map(m => this.toPayload(m, attachmentRefs));
     }
 
     /** 将JSON格式的payload转换为Message对象
@@ -40,9 +54,12 @@ export abstract class ProtocolAdapter{
 
     /** 将Message转换为JSON格式的payload 
      * @param msg 要转换的Message对象
+     * @param attachmentRefs 内容指纹到 Provider 附件表示的映射
      * @returns 返回一个JSON对象，包含role和content字段
+     * @note Adapter 不访问 IFileHost；附件字节/远端ID由 Session 预先解析后经此映射传入。
+     *       具体编码是平台职责，例如 base64 / data URL / file_id / URL。
     */
-    abstract toPayload(msg: Message): any;
+    abstract toPayload(msg: Message, attachmentRefs?: AttachmentWireMap): any;
 
     /** 将平台原始流式单元解析为归一化片段
      * @param raw 平台原始数据
@@ -181,13 +198,27 @@ export abstract class ModelProvider{
 }
 
 
-/** 云文件上传器，描述不同平台如何上传文件到云存储 */
-export abstract class CloudFileUploader{
-    /* TODO: 等待基础的ProtocolAdapter和ModelProvider完成，实现基础的对话功能后进一步推进附件系统和附件上传 */
+/** 云文件管理器，描述不同平台如何把本地附件转换为可发送的远端/内联表示
+ * @note 实现负责远端缓存、存在性校验、上传与过期处理；Session 只调用 ensureFile
+ */
+export abstract class CloudFileManager{
+
+    /** 确保附件在当前 Provider 侧可用
+     * @param file 本地附件快照
+     * @param signal 取消信号
+     * @returns 当前 Provider 可用的附件表示
+     * @note 实现应保证同一 contentHash 的并发调用不会重复上传
+     */
+    abstract ensureFile(file: AttachmentFile, signal?: AbortSignal): Promise<RemoteFileRef>;
+
+    /** 关闭并释放资源（可选） */
+    async close(): Promise<void> {
+        // 默认没有需要释放的资源
+    }
 }
 
 /** LLM服务提供者，可以是本地Ollama，云端OpenAI、DeepSeek，也可以是中转站等各类服务商
- * @description 继承该类，通过整合ModelProvider、ProtocolAdapter、CloudFileUploader来构造不同平台的LLM服务
+ * @description 继承该类，通过整合ModelProvider、ProtocolAdapter、CloudFileManager来构造不同平台的LLM服务
 */
 export abstract class LLMProvider{
 
@@ -202,6 +233,12 @@ export abstract class LLMProvider{
 
     /** 该 Provider 是否支持工具调用。UI 可据此禁用相关功能 */
     get supportsTools(): boolean { return false; }
+
+    /** 当前 Provider 的云文件管理器；null 表示不支持附件 */
+    get cloudFileManager(): CloudFileManager | null { return null; }
+
+    /** 该 Provider 是否具备附件处理能力；模型级能力由具体实现进一步约束 */
+    get supportsAttachments(): boolean { return this.cloudFileManager !== null; }
 
     /** 获取当前LLMProvider的协议适配器 */
     abstract get protocolAdapter(): ProtocolAdapter;

@@ -1,4 +1,5 @@
 import { uniqueId } from "../base";
+import type { IFileHost } from "../file";
 import { SessionError, SessionErrorType, ToolError, ToolErrorType } from "./error";
 import { AssistantMessage, ToolMessage, tool, user } from "./message";
 import type { Message } from "./message";
@@ -10,9 +11,11 @@ import {
     SessionEventType,
 } from "./type";
 import type {
+    AttachmentWireMap,
     ChatStopReason,
     ChatUsage,
     MessageContent,
+    RemoteFileRef,
     SessionEventListener,
     SessionEvent,
     SessionRuntimeOptions,
@@ -421,6 +424,11 @@ export type RunContext = {
 
     /** 请求人工审批；返回 abort 表示运行已取消 */
     requestApproval: (request: ToolApprovalRequest) => Promise<ToolApprovalResult>;
+
+    /** 解析本轮消息中的附件；无附件时返回 undefined
+     * @note 由 Session 通过 IFileHost 和 CloudFileManager 实现，RunEngine 不感知附件细节
+     */
+    resolveAttachments: (messages: readonly Message[]) => Promise<AttachmentWireMap | undefined>;
 }
 
 export class RunEngine{
@@ -459,12 +467,17 @@ export class RunEngine{
             });
         }
 
+        // 附件解析必须发生在 Adapter 转换之前；Adapter 本身不访问 IFileHost
+        const messages = this._messages(ctx);
+        const attachmentRefs = await ctx.resolveAttachments(messages);
+
         emit({ type: SessionEventType.ASSISTANT_START });
 
-        const chatResult = await ctx.llm.send(this._messages(ctx), ctx.runtimeOptions, {
+        const chatResult = await ctx.llm.send(messages, ctx.runtimeOptions, {
             onToken: _onToken,
             signal: ctx.signal,
             tools: tools.length > 0 ? [...tools] : undefined,
+            ...(attachmentRefs === undefined ? {} : { attachmentRefs }),
         });
 
         // 兜底：如果模型全程思考没有输出，手动触发思考结束事件
@@ -802,6 +815,10 @@ export class Session{
     private _runtimeOptions: SessionRuntimeOptions;
     private _currentSession?: SessionHistory;
     private _llm?: LLMProvider;
+    private _fileHost?: IFileHost;
+
+    /** 当前会话的运行期附件映射；只在内存中存在，不进入 SessionData */
+    private _attachmentRefs: AttachmentWireMap = new Map();
 
     private _activeRun: Run | null = null;
     private _abortController: AbortController | null = null;
@@ -822,15 +839,23 @@ export class Session{
         llm?: LLMProvider,
         history?: SessionHistory,
         options: SessionRuntimeOptions = {},
+        fileHost?: IFileHost,
     ){
         this._llm = llm;
         this._currentSession = history;
         this._runtimeOptions = { ...options };
+        this._fileHost = fileHost;
         this._runEngine = new RunEngine();
     }
 
     /** 当前会话数据 */
     get history(): SessionHistory | undefined{ return this._currentSession; }
+
+    /** 当前文件宿主；undefined 表示不支持附件 */
+    get fileHost(): IFileHost | undefined{ return this._fileHost; }
+
+    /** 当前会话的附件映射；返回副本，避免外部修改内部状态 */
+    get attachmentRefs(): AttachmentWireMap{ return new Map(this._attachmentRefs); }
 
     /** 当前活动 Run；null 表示空闲 */
     get activeRun(): Run | null{ return this._activeRun; }
@@ -885,16 +910,29 @@ export class Session{
         this._runtimeOptions = { ...this._runtimeOptions, model };
     }
 
-    /** 设置 LLMProvider；运行中不允许切换 */
+    /** 设置 LLMProvider；运行中不允许切换
+     * @note 远端附件表示与 Provider 绑定，切换时必须丢弃旧映射
+     */
     setLLM(llm: LLMProvider): void{
         this._assertIdle("switch LLM provider");
         this._llm = llm;
+        this._attachmentRefs = new Map();
+    }
+
+    /** 设置文件宿主；运行中不允许切换
+     * @note 宿主应与当前历史中的附件指纹兼容；切换会话时由调用方保证
+     */
+    setFileHost(fileHost: IFileHost | undefined): void{
+        this._assertIdle("switch file host");
+        this._fileHost = fileHost;
+        this._attachmentRefs = new Map();
     }
 
     /** 切换当前会话；运行中不允许切换 */
     changeSession(history: SessionHistory): void{
         this._assertIdle("change session");
         this._currentSession = history;
+        this._attachmentRefs = new Map();
     }
 
     /** 取消当前运行（暂停等待审批时同样有效） */
@@ -1048,6 +1086,11 @@ export class Session{
             enableUserInput,
             requestUserInput: (request, call) => this._requestUserInput(request, call),
             requestApproval: (request) => this._requestApproval(request),
+            resolveAttachments: (messages) => this._resolveAttachments(
+                messages,
+                llm,
+                abortController.signal,
+            ),
         };
 
         try{
@@ -1095,6 +1138,65 @@ export class Session{
             this._abortController = null;
             this._emit({ type: SessionEventType.STATE_CHANGE, state: this.state });
         }
+    }
+
+    /** 解析本轮消息中的附件
+     * @param messages 本轮发送给模型的消息（快照 + 待提交消息）
+     * @param llm 当前 LLMProvider
+     * @param signal 取消信号
+     * @returns 内容指纹到 Provider 附件表示的映射；无附件时返回 undefined
+     */
+    private async _resolveAttachments(
+        messages: readonly Message[],
+        llm: LLMProvider,
+        signal: AbortSignal,
+    ): Promise<AttachmentWireMap | undefined>{
+        const contentHashes = collectAttachmentHashes(messages);
+        if (contentHashes.size === 0){
+            this._attachmentRefs = new Map();
+            return undefined;
+        }
+
+        const fileHost = this._fileHost;
+        if (fileHost === undefined){
+            throw new SessionError(
+                SessionErrorType.InvalidRequest,
+                "Attachment content requires an IFileHost",
+            );
+        }
+
+        const cloudFileManager = llm.cloudFileManager;
+        if (!llm.supportsAttachments || cloudFileManager === null){
+            throw new SessionError(
+                SessionErrorType.InvalidRequest,
+                "The current LLM provider does not support attachments",
+            );
+        }
+
+        // 先构建新映射，成功后再替换；解析失败时不破坏上一轮的有效状态
+        const attachmentRefs = new Map<string, RemoteFileRef>();
+
+        for (const contentHash of contentHashes){
+            if (signal.aborted){
+                throw new SessionError(
+                    SessionErrorType.InvalidRequest,
+                    "Attachment resolution was aborted",
+                );
+            }
+
+            const file = await fileHost.get(contentHash);
+            if (file === undefined){
+                throw new SessionError(
+                    SessionErrorType.InvalidData,
+                    `Attachment file not found: ${contentHash}`,
+                );
+            }
+
+            attachmentRefs.set(contentHash, await cloudFileManager.ensureFile(file, signal));
+        }
+
+        this._attachmentRefs = attachmentRefs;
+        return attachmentRefs;
     }
 
     /** 请求人工输入；由 RunEngine 在调用 host__ask_user 时调用 */
@@ -1226,6 +1328,23 @@ function abortedResult(call: ToolCall): ToolCallResult{
             `Tool call "${call.name}" was aborted`,
         ),
     );
+}
+
+/** 收集消息内容中的唯一附件内容指纹 */
+function collectAttachmentHashes(messages: readonly Message[]): Set<string>{
+    const contentHashes = new Set<string>();
+
+    for (const message of messages){
+        if (typeof message.content === "string") continue;
+
+        for (const part of message.content){
+            if (part.type === "attachment"){
+                contentHashes.add(part.attachment.contentHash);
+            }
+        }
+    }
+
+    return contentHashes;
 }
 
 function errorMessage(error: unknown): string{

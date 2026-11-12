@@ -269,7 +269,7 @@ export class MessageSerializer{
     private static _deserializeAttachment(value: unknown, field: string): AttachmentRef{
         const record = asRecord(value, field);
         return {
-            id: asString(record.id, `${field}.id`),
+            contentHash: asString(record.contentHash, `${field}.contentHash`),
         };
     }
 

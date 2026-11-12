@@ -10,6 +10,7 @@
 - 工具审批暂停与恢复（`resume`）
 - 本地工具（读/写文件，带工作区沙箱）
 - MCP 工具客户端（stdio / Streamable HTTP）
+- 图片附件（内容指纹 + 本地文件宿主；Ollama 以 inline base64 发送）
 - 会话序列化、保存/恢复
 
 ## 目录与架构
@@ -55,6 +56,7 @@ npx tsx client.ts
 | `ROTOM_MCP_URL` | `http://127.0.0.1:5000/mcp` | MCP Server 地址 |
 | `ROTOM_MCP_ID` | `mcp` | MCP 工具的 Provider 前缀 |
 | `ROTOM_MCP_DISABLE` | 未设置 | 设为 `1` 时不注册 MCP |
+| `ROTOM_FILES_DIR` | `./.rotom-files` | 本地附件仓库目录 |
 
 CLI 命令：
 
@@ -65,6 +67,7 @@ CLI 命令：
 | `/list_models` | 列出 Ollama 模型及能力 |
 | `/tools` | 列出当前可用工具（含 MCP） |
 | `/permission [readonly\|approval\|full]` | 查看/切换权限 |
+| `/upload <image-path>` | 追加一个图片附件（jpg/jpeg/png/webp/gif），随下一条消息发送 |
 | `/save_session [path]` | 保存会话（默认 `./rotom-session.json`） |
 | `/restore_session [path]` | 恢复会话（会丢弃当前会话数据） |
 

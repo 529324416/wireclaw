@@ -16,7 +16,7 @@ export function cloneMessageContent(content: MessageContent): MessageContent{
         return {
             type: "attachment",
             attachment: {
-                id: part.attachment.id,
+                contentHash: part.attachment.contentHash,
             },
         };
     });
