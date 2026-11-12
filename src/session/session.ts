@@ -1,5 +1,5 @@
 import { uniqueId } from "../base";
-import { SessionError, SessionErrorType } from "./error";
+import { SessionError, SessionErrorType, ToolError, ToolErrorType } from "./error";
 import { AssistantMessage, ToolMessage, tool, user } from "./message";
 import type { Message } from "./message";
 import type { LLMProvider } from "./protocol";
@@ -16,6 +16,7 @@ import type {
     SessionEvent,
     SessionRuntimeOptions,
     ToolCall,
+    ToolCallResult,
     ToolDefinition,
 } from "./type";
 import type { ToolRegistry } from "./tool";
@@ -296,8 +297,27 @@ export class Run{
 /** 单次运行的最大模型轮数（防止工具调用死循环） */
 export const DEFAULT_MAX_STEPS = 16;
 
+/** 默认工具并发上限（1 = 顺序执行） */
+export const DEFAULT_TOOL_CONCURRENCY = 1;
+
 /** Session 在一次运行中需要的工具能力；ToolRegistry 天然满足该结构 */
 export type ToolSource = Pick<ToolRegistry, "listTools" | "invoke">;
+
+/** 工具审批决定 */
+export type ToolApprovalDecision = "approve" | "deny";
+
+/** 审批等待期间的内部结果；abort 表示运行已被取消 */
+export type ToolApprovalResult = ToolApprovalDecision | "abort";
+
+/** 审批请求 */
+export type ToolApprovalRequest = {
+
+    /** 待审批的工具调用 */
+    call: ToolCall;
+
+    /** 工具定义；未命中时为 null */
+    tool: ToolDefinition | null;
+};
 
 /** run() 的运行选项 */
 export type RunOptions = {
@@ -307,6 +327,9 @@ export type RunOptions = {
 
     /** 最大模型轮数，默认 DEFAULT_MAX_STEPS */
     maxSteps?: number;
+
+    /** 单批工具调用的最大并发数，默认 DEFAULT_TOOL_CONCURRENCY */
+    toolConcurrency?: number;
 };
 
 /** 运行上下文 */
@@ -335,6 +358,12 @@ export type RunContext = {
 
     /** 本次运行允许的最大模型轮数 */
     maxSteps: number;
+
+    /** 单批工具调用的最大并发数 */
+    toolConcurrency: number;
+
+    /** 请求人工审批；返回 abort 表示运行已取消 */
+    requestApproval: (request: ToolApprovalRequest) => Promise<ToolApprovalResult>;
 }
 
 export class RunEngine{
@@ -428,7 +457,7 @@ export class RunEngine{
 
                 if (!assistantMsg.hasToolCall) break;
 
-                await this._runTools(ctx, assistantMsg.toolCalls);
+                await this._runTools(ctx, tools, assistantMsg.toolCalls);
             }
         }finally{
             ctx.emit({
@@ -454,10 +483,15 @@ export class RunEngine{
         return tools;
     }
 
-    /** 顺序执行一轮助手消息中的所有工具调用
+    /** 执行一轮助手消息中的工具调用
      * @note 并发策略属于 AgentLoop 的职责，Registry 只负责工具范围
+     * @note 只要本批存在需要审批的调用，就退化为顺序执行，保证同一时刻只有一个审批
      */
-    private async _runTools(ctx: RunContext, calls: readonly ToolCall[]): Promise<void>{
+    private async _runTools(
+        ctx: RunContext,
+        tools: readonly ToolDefinition[],
+        calls: readonly ToolCall[],
+    ): Promise<void>{
         const toolkit = ctx.tools;
         if (toolkit === undefined){
             throw new SessionError(
@@ -466,19 +500,111 @@ export class RunEngine{
             );
         }
 
-        for (const call of calls){
-            if (ctx.signal.aborted) return;
+        if (calls.length === 0) return;
 
-            ctx.emit({ type: SessionEventType.TOOL_CALL_START, call });
+        const definitions = calls.map(
+            (call) => tools.find((item) => item.name === call.name) ?? null,
+        );
 
-            const result = await toolkit.invoke(call, { signal: ctx.signal });
+        const needsApproval = definitions.some(
+            (definition) => definition?.annotations?.requiresApproval === true,
+        );
+
+        // 只有并发安全的工具才支持并发执行
+        const allConcurrencySafe = definitions.every(
+            (definition) => definition?.annotations?.concurrencySafe === true,
+        );
+
+        if (!needsApproval
+            && calls.length > 1
+            && ctx.toolConcurrency > 1
+            && allConcurrencySafe){
+            await this._runToolsConcurrently(ctx, toolkit, calls);
+            return;
+        }
+
+        await this._runToolsSequentially(ctx, toolkit, calls, definitions);
+    }
+
+    /** 顺序执行一批工具调用 */
+    private async _runToolsSequentially(
+        ctx: RunContext,
+        toolkit: ToolSource,
+        calls: readonly ToolCall[],
+        definitions: readonly (ToolDefinition | null)[],
+    ): Promise<void>{
+        for (const [index, call] of calls.entries()){
+            const result = await this._invokeTool(ctx, toolkit, call, definitions[index] ?? null);
+            if (result === null) return;
 
             // 无论成功失败都物化成 ToolMessage，保证 call/result 成对
             ctx.run.appendMessage(tool(result, call.name, call.id));
             ctx.emit({ type: SessionEventType.TOOL_CALL_END, call, result });
-
-            if (ctx.signal.aborted) return;
         }
+    }
+
+    /** 在并发上限内执行一批并发安全的工具调用
+     * @note 结果按调用顺序物化，保证历史可重放
+     */
+    private async _runToolsConcurrently(
+        ctx: RunContext,
+        toolkit: ToolSource,
+        calls: readonly ToolCall[],
+    ): Promise<void>{
+        const results: (ToolCallResult | undefined)[] = new Array(calls.length).fill(undefined);
+        let cursor = 0;
+
+        const worker = async (): Promise<void> => {
+            while (ctx.signal.aborted === false){
+                const index = cursor;
+                cursor += 1;
+                if (index >= calls.length) return;
+
+                const call = calls[index];
+                ctx.emit({ type: SessionEventType.TOOL_CALL_START, call });
+                results[index] = await toolkit.invoke(call, { signal: ctx.signal });
+            }
+        };
+
+        const workerCount = Math.min(ctx.toolConcurrency, calls.length);
+        const settled = await Promise.allSettled(
+            Array.from({ length: workerCount }, () => worker()),
+        );
+
+        const failure = settled.find((item) => item.status === "rejected");
+        if (failure !== undefined && failure.status === "rejected") throw failure.reason;
+
+        for (const [index, call] of calls.entries()){
+            const result = results[index];
+            if (result === undefined) continue;
+
+            ctx.run.appendMessage(tool(result, call.name, call.id));
+            ctx.emit({ type: SessionEventType.TOOL_CALL_END, call, result });
+        }
+    }
+
+    /** 执行单个工具调用（含审批）
+     * @returns 工具结果；null 表示运行已取消
+     */
+    private async _invokeTool(
+        ctx: RunContext,
+        toolkit: ToolSource,
+        call: ToolCall,
+        definition: ToolDefinition | null,
+    ): Promise<ToolCallResult | null>{
+        if (ctx.signal.aborted) return null;
+
+        ctx.emit({ type: SessionEventType.TOOL_CALL_START, call });
+
+        if (definition?.annotations?.requiresApproval === true){
+            const decision = await ctx.requestApproval({ call, tool: definition });
+
+            // 取消也物化成结果，保证 TOOL_CALL_START / TOOL_CALL_END 成对
+            if (decision === "abort" || ctx.signal.aborted) return abortedResult(call);
+            if (decision === "deny") return deniedResult(call);
+        }
+
+        return await toolkit.invoke(call, { signal: ctx.signal });
     }
 
     /** 取消运行；当前阶段只依赖外部 AbortSignal */
@@ -507,6 +633,12 @@ export class Session{
     private _activeRun: Run | null = null;
     private _abortController: AbortController | null = null;
 
+    /** 等待人工审批的调用；同一时刻最多一个 */
+    private _approval: {
+        request: ToolApprovalRequest;
+        resolve: (result: ToolApprovalResult) => void;
+    } | null = null;
+
     constructor(
         llm?: LLMProvider,
         history?: SessionHistory,
@@ -526,6 +658,11 @@ export class Session{
 
     /** 是否正在运行 */
     get isBusy(): boolean{ return this._activeRun !== null; }
+
+    /** 当前待审批的工具调用；null 表示没有 */
+    get pendingApproval(): ToolApprovalRequest | null{
+        return this._approval?.request ?? null;
+    }
 
     /** 会话状态由 activeRun/RunStatus 派生，不单独保存一份状态 */
     get state(): SessionState{
@@ -571,15 +708,35 @@ export class Session{
         this._currentSession = history;
     }
 
-    /** 取消当前运行 */
+    /** 取消当前运行（暂停等待审批时同样有效） */
     cancel(): void{
         if (this._activeRun === null || this._abortController === null) return;
         if (this._abortController.signal.aborted) return;
+
+        const pending = this._takeApproval();
 
         this._activeRun.markAborting();
         this._emit({ type: SessionEventType.STATE_CHANGE, state: this.state });
         this._emit({ type: SessionEventType.USER_ABORT });
         this._abortController.abort();
+        pending?.resolve("abort");
+    }
+
+    /** 提交审批结果并恢复被暂停的运行
+     * @param decision approve 继续执行；deny 把拒绝作为工具结果回灌模型
+     * @returns 是否成功恢复
+     */
+    resume(decision: ToolApprovalDecision): boolean{
+        if (decision !== "approve" && decision !== "deny") return false;
+
+        const pending = this._takeApproval();
+        const run = this._activeRun;
+        if (pending === null || run === null) return false;
+
+        run.resume();
+        this._emit({ type: SessionEventType.STATE_CHANGE, state: this.state });
+        pending.resolve(decision);
+        return true;
     }
 
     /**
@@ -612,6 +769,14 @@ export class Session{
             );
         }
 
+        const toolConcurrency = options.toolConcurrency ?? DEFAULT_TOOL_CONCURRENCY;
+        if (!Number.isInteger(toolConcurrency) || toolConcurrency < 1){
+            throw new SessionError(
+                SessionErrorType.InvalidRequest,
+                `toolConcurrency must be a positive integer, got ${String(options.toolConcurrency)}`,
+            );
+        }
+
         const history = this._currentSession;
         const llm = this._llm;
         const inputMessage = user(input);
@@ -635,6 +800,8 @@ export class Session{
             signal: abortController.signal,
             tools: options.tools,
             maxSteps,
+            toolConcurrency,
+            requestApproval: (request) => this._requestApproval(request),
         };
 
         try{
@@ -664,12 +831,45 @@ export class Session{
             }
             return run;
         }finally{
+            // 运行结束时不留下悬空的审批 Promise
+            const pending = this._takeApproval();
+            pending?.resolve("abort");
+
             if (this._activeRun === run){
                 this._activeRun = null;
             }
             this._abortController = null;
             this._emit({ type: SessionEventType.STATE_CHANGE, state: this.state });
         }
+    }
+
+    /** 请求人工审批；由 RunEngine 在工具调用前调用 */
+    private _requestApproval(request: ToolApprovalRequest): Promise<ToolApprovalResult>{
+        const run = this._activeRun;
+        if (run === null || this._abortController?.signal.aborted === true){
+            return Promise.resolve("abort");
+        }
+
+        return new Promise<ToolApprovalResult>((resolve) => {
+            this._approval = { request, resolve };
+            run.markPaused();
+            this._emit({ type: SessionEventType.STATE_CHANGE, state: this.state });
+            this._emit({
+                type: SessionEventType.TOOL_APPROVAL_REQUIRED,
+                call: request.call,
+                tool: request.tool,
+            });
+        });
+    }
+
+    /** 取走当前审批，保证同一时间只有一个 */
+    private _takeApproval(): {
+        request: ToolApprovalRequest;
+        resolve: (result: ToolApprovalResult) => void;
+    } | null{
+        const pending = this._approval;
+        this._approval = null;
+        return pending;
     }
 
     private _assertIdle(action: string): void{
@@ -690,6 +890,43 @@ export class Session{
             }
         }
     }
+}
+
+/** 把工具错误包装成工具调用结果 */
+function toolErrorResult(error: ToolError): ToolCallResult{
+    return {
+        content: error.message,
+        status: {
+            isSuccess: false,
+            error,
+            retryable: error.retryable,
+            duration: 0,
+        },
+        structuredContent: undefined,
+        raw: undefined,
+    };
+}
+
+/** 审批被拒绝时返回的工具结果 */
+function deniedResult(call: ToolCall): ToolCallResult{
+    return toolErrorResult(
+        new ToolError(
+            ToolErrorType.Denied,
+            false,
+            `Tool call "${call.name}" was denied by the user`,
+        ),
+    );
+}
+
+/** 运行在审批阶段被取消时返回的工具结果 */
+function abortedResult(call: ToolCall): ToolCallResult{
+    return toolErrorResult(
+        new ToolError(
+            ToolErrorType.AbortError,
+            false,
+            `Tool call "${call.name}" was aborted`,
+        ),
+    );
 }
 
 function errorMessage(error: unknown): string{

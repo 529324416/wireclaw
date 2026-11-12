@@ -173,6 +173,9 @@ export const SessionEventType = {
     /** 工具调用结束 */
     TOOL_CALL_END: 'tool_call_end',
 
+    /** 工具调用需要人工审批（会话进入暂停状态） */
+    TOOL_APPROVAL_REQUIRED: 'tool_approval_required',
+
     /** 用户终止 */
     USER_ABORT: 'user_abort',
 
@@ -202,6 +205,7 @@ export type SessionEvent =
     // 工具调用类消息
     | { type: typeof SessionEventType.TOOL_CALL_START, call: ToolCall }
     | { type: typeof SessionEventType.TOOL_CALL_END, call: ToolCall, result: ToolCallResult }
+    | { type: typeof SessionEventType.TOOL_APPROVAL_REQUIRED, call: ToolCall, tool: ToolDefinition | null }
 
     // 用户操作
     | { type: typeof SessionEventType.USER_ABORT }
@@ -329,6 +333,12 @@ export type ToolDefinition = {
         destructiveHint?: boolean;
         idempotentHint?: boolean;
         openWorldHint?: boolean;
+
+        /** 是否允许与其他工具并发执行；未声明时按不可并发处理 */
+        concurrencySafe?: boolean;
+
+        /** 调用前是否需要人工审批；未声明时不需要 */
+        requiresApproval?: boolean;
     };
     /** 工具来源；Provider 可以留空，由 ToolRegistry 填充 */
     source?: ToolDefinitionSource;
