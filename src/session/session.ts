@@ -1,6 +1,6 @@
 import { uniqueId } from "../base";
 import { SessionError, SessionErrorType } from "./error";
-import { AssistantMessage, ToolMessage, user } from "./message";
+import { AssistantMessage, ToolMessage, tool, user } from "./message";
 import type { Message } from "./message";
 import type { LLMProvider } from "./protocol";
 import {
@@ -9,16 +9,16 @@ import {
     SessionEventType,
 } from "./type";
 import type {
-    ChatResult,
     ChatStopReason,
     ChatUsage,
     MessageContent,
-    SessionData,
     SessionEventListener,
     SessionEvent,
     SessionRuntimeOptions,
     ToolCall,
+    ToolDefinition,
 } from "./type";
+import type { ToolRegistry } from "./tool";
 
 function emptyUsage(): ChatUsage{
     return {
@@ -146,10 +146,11 @@ export class SessionHistory{
         }
 
         const last = pendingMsgs[pendingMsgs.length - 1];
-        if (!(last instanceof AssistantMessage)){
+        // 正常结束以助手消息收尾；因步数上限被截断时允许以已闭合的工具消息收尾
+        if (!(last instanceof AssistantMessage) && !(last instanceof ToolMessage)){
             throw new SessionError(
                 SessionErrorType.InvalidData,
-                "Pending messages should end with an assistant message",
+                "Pending messages should end with an assistant or tool message",
             );
         }
     }
@@ -292,6 +293,22 @@ export class Run{
     }
 }
 
+/** 单次运行的最大模型轮数（防止工具调用死循环） */
+export const DEFAULT_MAX_STEPS = 16;
+
+/** Session 在一次运行中需要的工具能力；ToolRegistry 天然满足该结构 */
+export type ToolSource = Pick<ToolRegistry, "listTools" | "invoke">;
+
+/** run() 的运行选项 */
+export type RunOptions = {
+
+    /** 本次运行可访问的工具集；不传则不启用工具调用 */
+    tools?: ToolSource;
+
+    /** 最大模型轮数，默认 DEFAULT_MAX_STEPS */
+    maxSteps?: number;
+};
+
 /** 运行上下文 */
 export type RunContext = {
 
@@ -313,8 +330,11 @@ export type RunContext = {
     /** 取消信号 */
     signal: AbortSignal;
 
-    /** Mcp提供器 */
-    // TODO: 暂不追加/先实现基础的对话功能
+    /** 本次运行可访问的工具；undefined 表示不启用工具调用 */
+    tools?: ToolSource;
+
+    /** 本次运行允许的最大模型轮数 */
+    maxSteps: number;
 }
 
 export class RunEngine{
@@ -325,8 +345,8 @@ export class RunEngine{
     }
 
 
-    /** 单次模型调用；本阶段不处理工具调用 */
-    private async _turn(ctx: RunContext){
+    /** 单次模型调用；返回本轮助手消息 */
+    private async _turn(ctx: RunContext, tools: readonly ToolDefinition[]): Promise<AssistantMessage>{
         const { emit } = ctx;
 
         let thinkingAccum = "";
@@ -358,6 +378,7 @@ export class RunEngine{
         const chatResult = await ctx.llm.send(this._messages(ctx), ctx.runtimeOptions, {
             onToken: _onToken,
             signal: ctx.signal,
+            tools: tools.length > 0 ? [...tools] : undefined,
         });
 
         // 兜底：如果模型全程思考没有输出，手动触发思考结束事件
@@ -378,26 +399,86 @@ export class RunEngine{
             );
         }
 
-        if (outputMsg.hasToolCall){
-            throw new SessionError(
-                SessionErrorType.MissingTools,
-                "Tool calls are not supported in the single-turn RunEngine yet",
-            );
-        }
-
         ctx.run.appendMessage(outputMsg);
         emit({
-            type: SessionEventType.ASSISTANT_COMPLETE,
+            type: SessionEventType.ASSISTANT_COMPLETE_TURN,
             msg: outputMsg.content,
             usage: outputMsg.usage,
         });
+
+        return outputMsg;
     }
 
-    /** 推进一次单轮运行；工具循环留到后续实现 */
+    /** 推进一次运行：对话 -> 工具调用循环 -> 最终输出 */
     async _run(ctx: RunContext){
         if (ctx.signal.aborted) return;
-        ctx.run.nextStep();
-        await this._turn(ctx);
+
+        let lastAssistant: AssistantMessage | undefined;
+
+        try{
+            const tools = await this._resolveTools(ctx);
+
+            while (ctx.signal.aborted === false){
+                // 步数上限：防止工具调用死循环
+                if (ctx.run.step >= ctx.maxSteps) break;
+
+                ctx.run.nextStep();
+                const assistantMsg = await this._turn(ctx, tools);
+                lastAssistant = assistantMsg;
+
+                if (!assistantMsg.hasToolCall) break;
+
+                await this._runTools(ctx, assistantMsg.toolCalls);
+            }
+        }finally{
+            ctx.emit({
+                type: SessionEventType.ASSISTANT_COMPLETE,
+                msg: lastAssistant?.content ?? "",
+                usage: ctx.run.pendingUsage,
+            });
+        }
+    }
+
+    /** 取本次运行的工具快照；工具集在整轮运行内保持稳定 */
+    private async _resolveTools(ctx: RunContext): Promise<ToolDefinition[]>{
+        if (ctx.tools === undefined) return [];
+
+        const tools = await ctx.tools.listTools(ctx.signal);
+        if (tools.length > 0 && !ctx.llm.supportsTools){
+            throw new SessionError(
+                SessionErrorType.MissingTools,
+                "The current LLM provider does not support tool calls",
+            );
+        }
+
+        return tools;
+    }
+
+    /** 顺序执行一轮助手消息中的所有工具调用
+     * @note 并发策略属于 AgentLoop 的职责，Registry 只负责工具范围
+     */
+    private async _runTools(ctx: RunContext, calls: readonly ToolCall[]): Promise<void>{
+        const toolkit = ctx.tools;
+        if (toolkit === undefined){
+            throw new SessionError(
+                SessionErrorType.MissingTools,
+                "Model requested tools but no tool source was provided for this run",
+            );
+        }
+
+        for (const call of calls){
+            if (ctx.signal.aborted) return;
+
+            ctx.emit({ type: SessionEventType.TOOL_CALL_START, call });
+
+            const result = await toolkit.invoke(call, { signal: ctx.signal });
+
+            // 无论成功失败都物化成 ToolMessage，保证 call/result 成对
+            ctx.run.appendMessage(tool(result, call.name, call.id));
+            ctx.emit({ type: SessionEventType.TOOL_CALL_END, call, result });
+
+            if (ctx.signal.aborted) return;
+        }
     }
 
     /** 取消运行；当前阶段只依赖外部 AbortSignal */
@@ -502,13 +583,17 @@ export class Session{
     }
 
     /**
-     * 执行一次基础对话。
+     * 执行一次对话。
      *
-     * 当前阶段只做一次模型调用，不支持工具循环。
+     * 流程：对话 -> 工具调用循环 -> 最终输出。
+     * 工具集由调用方通过 options.tools 传入，并在整轮运行内保持稳定；
      * 成功时才把 run.pendingMessages 提交到 SessionHistory；
      * 失败或取消时直接丢弃 pending，历史保持干净。
+     *
+     * @param input 用户输入
+     * @param options 运行选项（工具集、最大轮数）
      */
-    async run(input: MessageContent): Promise<Run>{
+    async run(input: MessageContent, options: RunOptions = {}): Promise<Run>{
         if (this._activeRun !== null){
             throw new SessionError(SessionErrorType.Busy, "Session is already running");
         }
@@ -517,6 +602,14 @@ export class Session{
         }
         if (this._llm === undefined){
             throw new SessionError(SessionErrorType.MissingProvider, "LLMProvider is not set");
+        }
+
+        const maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
+        if (!Number.isInteger(maxSteps) || maxSteps < 1){
+            throw new SessionError(
+                SessionErrorType.InvalidRequest,
+                `maxSteps must be a positive integer, got ${String(options.maxSteps)}`,
+            );
         }
 
         const history = this._currentSession;
@@ -540,6 +633,8 @@ export class Session{
             emit: (event) => this._emit(event),
             llm,
             signal: abortController.signal,
+            tools: options.tools,
+            maxSteps,
         };
 
         try{

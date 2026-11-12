@@ -1,15 +1,26 @@
 {
   "name": "rotom",
   "version": "1.0.0",
-  "description": "an ai harness module ",
+  "description": "an ai harness module",
   "keywords": [
     "ai"
   ],
   "license": "MIT",
   "author": "biscuit",
   "type": "module",
-  "main": "index.ts",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "files": [
+    "src"
+  ],
+  "engines": {
+    "node": ">=20.3.0"
+  },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
   }
 }

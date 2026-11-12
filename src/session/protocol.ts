@@ -2,27 +2,26 @@
 
 import { handleSessionError } from "./error";
 import type { AssistantMessage, Message } from "./message";
-import type { SessionRuntimeOptions, ChatResult, MessageContent, ModelThinkingLevel, StreamChunk, ChatOptions } from "./type";
+import type { SessionRuntimeOptions, ChatResult, ModelThinkingLevel, StreamChunk, ChatOptions, ToolDefinition } from "./type";
 
 
 /** 协议适配器，描述不同平台的协议差异 */
 export abstract class ProtocolAdapter{
 
-    // TODO: 完善Session的基础对话后，再完善该函数
     /** 转换工具定义列表为该平台的请求格式。
      *  默认实现走 OpenAI 兼容格式（Ollama / OpenAI / DeepSeek 等都通用）。
      *  平台不同（如 Anthropic 用 input_schema）时覆写此方法。
      */
-    // toolDefinitionsToPayload(tools: ToolDefinition[]): unknown {
-    //     return tools.map(t => ({
-    //         type: 'function',
-    //         function: {
-    //             name: t.name,
-    //             description: t.description,
-    //             parameters: t.parameters,
-    //         },
-    //     }));
-    // }
+    toolDefinitionsToPayload(tools: readonly ToolDefinition[]): unknown {
+        return tools.map((tool) => ({
+            type: "function",
+            function: {
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.inputSchema,
+            },
+        }));
+    }
 
     /** 转换消息列表为该平台的请求格式 
      * @param msgs 要转换的消息列表

@@ -1,6 +1,6 @@
 /* Session模块类型定义 */
 
-import { ToolError, ToolErrorType } from "./error";
+import { ToolError } from "./error";
 import type { AssistantMessage } from "./message";
 
 /** 附件引用 */
@@ -31,7 +31,7 @@ export type ToolCallStatus = {
     /** 是否成功 */
     isSuccess: boolean;
     
-    /** 耗时 */
+    /** 耗时（毫秒） */
     duration: number;
 
     /** 工具调用错误类型 */
@@ -39,6 +39,9 @@ export type ToolCallStatus = {
 
     /** 是否可重试 */
     retryable?: boolean;
+
+    /** @deprecated 旧序列化字段；工具/附件模块完成后随 ToolCallStatus 一起重构 */
+    failureInfo?: string;
 }
 
 /** 工具调用结果 */
@@ -260,8 +263,8 @@ export type ChatOptions = {
     /** 模型输出回调 */
     onToken?: (token: MessageContent, isThinking: boolean) => void;
 
-    /** 工具调用列表 */
-    // TODO: 待实现
+    /** 本轮可用的工具定义；不传或空数组表示不启用工具调用 */
+    tools?: ToolDefinition[];
 };
 
 /* ---- 流式解析单元 ---- */
@@ -291,9 +294,10 @@ export type StreamChunk =
     | { type: "error"; failureReason: ChatFailureReason; message?: string };
 
 
-/** JSON Schema 定义 */
+/** JSON Schema 定义（只声明工具参数会用到的关键字） */
 export type ToolParamSchema = {
-    type?: string;
+    /** 参数类型；JSON Schema 允许单类型或类型数组 */
+    type?: string | string[];
     title?: string;
     description?: string;
     properties?: Record<string, ToolParamSchema>;
@@ -303,9 +307,19 @@ export type ToolParamSchema = {
     [key: string]: unknown;
 }
 
-/** 工具是什么（名称、描述、schema、权限注解）*/
+/** 工具来源信息（由 ToolRegistry 统一填充） */
+export type ToolDefinitionSource = {
+    providerId: string;
+    serverName?: string;
+    version?: string;
+};
+
+/** 工具是什么（名称、描述、schema、权限注解）
+ * @note name 是 Provider 提供的裸工具名（不含 Provider 前缀），
+ *       ToolRegistry 会拼装为 `<providerId>__<name>` 后再暴露给模型。
+ */
 export type ToolDefinition = {
-    name: string;                 // 暴露给模型的名字，建议带命名空间
+    name: string;
     title?: string;
     description: string;
     inputSchema: ToolParamSchema;      // 模型看到的参数 schema
@@ -316,9 +330,6 @@ export type ToolDefinition = {
         idempotentHint?: boolean;
         openWorldHint?: boolean;
     };
-    source: {
-        providerId: string;
-        serverName?: string;
-        version?: string;
-    };
+    /** 工具来源；Provider 可以留空，由 ToolRegistry 填充 */
+    source?: ToolDefinitionSource;
 };

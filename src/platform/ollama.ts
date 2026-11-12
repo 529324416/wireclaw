@@ -28,23 +28,6 @@ type OllamaMessage = {
     tool_call_id?: string;
 };
 
-type OllamaToolCall = {
-    id?: string;
-    function?: {
-        name?: string;
-        arguments?: unknown;
-    };
-};
-
-type OllamaModelTag = {
-    name?: string;
-    model?: string;
-    modified_at?: string;
-    size?: number;
-    digest?: string;
-    details?: Record<string, unknown>;
-};
-
 type OllamaShowResponse = {
     capabilities?: unknown[];
     details?: Record<string, unknown>;
@@ -448,6 +431,8 @@ export class OllamaLLMProvider extends LLMProvider{
     get protocolAdapter(): OllamaProtocolAdapter{ return this._protocolAdapter; }
     get title(): string{ return "Ollama"; }
 
+    override get supportsTools(): boolean{ return true; }
+
     async send(
         messages: readonly Message[],
         options: SessionRuntimeOptions,
@@ -472,6 +457,9 @@ export class OllamaLLMProvider extends LLMProvider{
         };
         if (Object.keys(requestOptions).length > 0){
             payload.options = requestOptions;
+        }
+        if (turn?.tools !== undefined && turn.tools.length > 0){
+            payload.tools = this._protocolAdapter.toolDefinitionsToPayload(turn.tools);
         }
         if (options.think !== undefined){
             payload.think = options.think;

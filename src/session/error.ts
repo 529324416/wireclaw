@@ -71,6 +71,16 @@ export class ToolError extends RotomError{
     }
 }
 
+/** duck typing 判断 ToolError，避免跨 bundle 时 instanceof 失效 */
+export function isToolError(e: unknown): e is ToolError {
+    if (typeof e !== "object" || e === null) return false;
+
+    const candidate = e as { name?: unknown; type?: unknown; retryable?: unknown };
+    return candidate.name === "ToolError"
+        && typeof candidate.type === "string"
+        && typeof candidate.retryable === "boolean";
+}
+
 /** duck typing 判断，避免跨 bundle 时 instanceof 失效 */
 export function isSessionError(e: unknown): e is SessionError {
     return e instanceof Error && typeof (e as { type?: unknown }).type === 'string';

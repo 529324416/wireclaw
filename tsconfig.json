@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    /* 运行环境：Node >= 20 + tsx（源码直接执行，不产出构建物） */
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["node"],
+
+    /* 类型严格度 */
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "forceConsistentCasingInFileNames": true,
+
+    /* ESM 语义：要求 type-only 导入显式写成 import type，
+       避免 tsx / Node ESM 在运行期导入并不存在的类型绑定 */
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+
+    /* 工具链 */
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "test", "test.ts", "client.ts"]
+}
