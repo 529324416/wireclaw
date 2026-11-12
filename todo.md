@@ -42,6 +42,7 @@ MCP 并不只是「跨进程提供工具」：
 - [x] `outputSchema` 校验（结构错误作为工具失败结果回传模型）
 - [x] `adviceTimeout`（默认 30s，上限 3600s）
 - [x] 进度探针 API（按 `callId` 查询 + 延迟 5s 的 `TOOL_PROGRESS` 事件）
+- [x] `host__ask_user` 人工选择题（Session 自动注入，可用 `enableUserInput` 关闭）
 - [ ] 工具结果信任标记（不可信外部内容的提示/隔离）
 
 ### 协议广度
@@ -49,6 +50,7 @@ MCP 并不只是「跨进程提供工具」：
 - [ ] `resources`
 - [ ] `prompts`
 - [ ] `notifications/progress` 转发
+- [ ] MCP `elicitation`（服务端发起的人工输入，复用 ask_user 表单机制）
 - [ ] 更完整的 JSON Schema 校验（`pattern` / `oneOf` / `$ref` 等）
 - [ ] 多模态内容（依赖附件系统）
 - [ ] `tasks` / 长任务

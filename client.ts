@@ -7,6 +7,7 @@ import { OllamaLLMProvider } from "./src/platform/index";
 import { createMcpProvider, LocalToolProvider } from "./src/tool/index";
 import {
     DEFAULT_SESSION_PERMISSION,
+    HOST_TOOL_DEFINITIONS,
     RunStatus,
     Session,
     SessionHistory,
@@ -15,7 +16,12 @@ import {
     ToolRegistry,
 } from "./src/session/index";
 import { SessionEventType } from "./src/session/type";
-import type { SessionEvent, SessionRuntimeOptions } from "./src/session/type";
+import type {
+    SessionEvent,
+    SessionRuntimeOptions,
+    UserInputAnswer,
+    UserInputResult,
+} from "./src/session/type";
 
 /**
  * Rotom 控制台客户端。
@@ -49,6 +55,11 @@ const MCP_DISABLED = process.env.ROTOM_MCP_DISABLE === "1";
 type ApprovalEvent = Extract<
     SessionEvent,
     { type: typeof SessionEventType.TOOL_APPROVAL_REQUIRED }
+>;
+
+type InputEvent = Extract<
+    SessionEvent,
+    { type: typeof SessionEventType.TOOL_INPUT_REQUIRED }
 >;
 
 function textOfContent(content: unknown): string {
@@ -171,6 +182,66 @@ async function main(): Promise<void> {
         );
     };
 
+    const askUserInput = async (event: InputEvent): Promise<void> => {
+        const { request } = event;
+        process.stdout.write(`\n[input] ${request.title ?? "需要你的选择"}\n`);
+
+        const answers: UserInputAnswer[] = [];
+
+        for (const question of request.questions) {
+            process.stdout.write(`\n  ${question.header ? `[${question.header}] ` : ""}${question.question}\n`);
+            question.options.forEach((option, index) => {
+                process.stdout.write(
+                    `    ${index + 1}) ${option.label}${option.description ? ` - ${option.description}` : ""}\n`,
+                );
+            });
+
+            let selected: string[] = [];
+            while (true) {
+                let line = "";
+                try {
+                    line = await rl.question(
+                        question.multiSelect === true ? "  选择（逗号分隔）: " : "  选择: ",
+                    );
+                } catch {
+                    line = "";
+                }
+
+                const trimmed = line.trim();
+                if (trimmed.length === 0) {
+                    const cancelled = session.respondUserInput({
+                        requestId: request.id,
+                        answers: [],
+                        cancelled: true,
+                    });
+                    process.stdout.write(
+                        cancelled ? "  cancelled\n" : "  (run is no longer waiting for input)\n",
+                    );
+                    return;
+                }
+
+                const indexes = trimmed.split(",").map((part) => Number.parseInt(part.trim(), 10));
+                const valid = indexes.length > 0
+                    && indexes.every((index) => Number.isInteger(index) && index >= 1 && index <= question.options.length)
+                    && (question.multiSelect === true || indexes.length === 1);
+
+                if (!valid) {
+                    process.stdout.write("  无效选择\n");
+                    continue;
+                }
+
+                selected = indexes.map((index) => question.options[index - 1].id);
+                break;
+            }
+
+            answers.push({ questionId: question.id, selected });
+        }
+
+        const result: UserInputResult = { requestId: request.id, answers };
+        const resumed = session.respondUserInput(result);
+        process.stdout.write(resumed ? "  submitted\n" : "  (run is no longer waiting for input)\n");
+    };
+
     session.subscribe((event: SessionEvent) => {
         switch (event.type) {
             case SessionEventType.ASSISTANT_START:
@@ -227,6 +298,10 @@ async function main(): Promise<void> {
                     + (event.progress.message !== undefined ? ` ${event.progress.message}` : "")
                     + "\n",
                 );
+                break;
+
+            case SessionEventType.TOOL_INPUT_REQUIRED:
+                void askUserInput(event);
                 break;
 
             case SessionEventType.TOOL_PERMISSION_WARNING:
@@ -344,7 +419,7 @@ async function main(): Promise<void> {
 
                 if (command === "tools") {
                     try {
-                        const tools = await registry.listTools();
+                        const tools = [...await registry.listTools(), ...HOST_TOOL_DEFINITIONS];
                         console.log(`available tools (${tools.length}):`);
                         for (const tool of tools) {
                             const marks: string[] = [];
@@ -352,7 +427,7 @@ async function main(): Promise<void> {
                             if (tool.annotations?.requiresApproval === true) marks.push("approval");
                             if (tool.annotations?.concurrencySafe === true) marks.push("concurrent");
                             const suffix = marks.length > 0 ? ` [${marks.join(", ")}]` : "";
-                            console.log(`  - ${tool.name} (${tool.source.providerId})${suffix}`);
+                            console.log(`  - ${tool.name} (${tool.source?.providerId ?? "host"})${suffix}`);
                         }
                     } catch (error) {
                         console.error(`[tools] ${errorMessage(error)}`);

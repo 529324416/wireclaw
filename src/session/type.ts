@@ -83,6 +83,44 @@ export type ToolProgress = {
     updatedAt: number;
 };
 
+/** 选择题选项 */
+export type UserQuestionOption = {
+    id: string;
+    label: string;
+    description?: string;
+};
+
+/** 单个问题 */
+export type UserQuestion = {
+    id: string;
+    header?: string;
+    question: string;
+    options: UserQuestionOption[];
+    multiSelect?: boolean;
+    allowOther?: boolean;
+};
+
+/** 人工输入请求 */
+export type UserInputRequest = {
+    id: string;
+    title?: string;
+    questions: UserQuestion[];
+};
+
+/** 单个问题的回答 */
+export type UserInputAnswer = {
+    questionId: string;
+    selected: string[];
+    other?: string;
+};
+
+/** 人工输入结果 */
+export type UserInputResult = {
+    requestId: string;
+    answers: UserInputAnswer[];
+    cancelled?: boolean;
+};
+
 /** 工具调用结果 */
 export type ToolCallResult = {
 
@@ -215,6 +253,9 @@ export const SessionEventType = {
     /** 工具调用进度（超过延迟阈值后才会发出） */
     TOOL_PROGRESS: 'tool_progress',
 
+    /** 工具请求人工输入（会话进入暂停状态） */
+    TOOL_INPUT_REQUIRED: 'tool_input_required',
+
     /** 工具调用需要人工审批（会话进入暂停状态） */
     TOOL_APPROVAL_REQUIRED: 'tool_approval_required',
 
@@ -251,6 +292,7 @@ export type SessionEvent =
     | { type: typeof SessionEventType.TOOL_CALL_START, call: ToolCall }
     | { type: typeof SessionEventType.TOOL_CALL_END, call: ToolCall, result: ToolCallResult }
     | { type: typeof SessionEventType.TOOL_PROGRESS, call: ToolCall, progress: ToolProgress }
+    | { type: typeof SessionEventType.TOOL_INPUT_REQUIRED, call: ToolCall, request: UserInputRequest }
     | { type: typeof SessionEventType.TOOL_APPROVAL_REQUIRED, call: ToolCall, tool: ToolDefinition | null }
     | { type: typeof SessionEventType.TOOL_PERMISSION_WARNING, call: ToolCall, tool: ToolDefinition | null, message: string }
 

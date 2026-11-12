@@ -20,8 +20,17 @@ import type {
     ToolCallResult,
     ToolDefinition,
     ToolProgress,
+    UserInputRequest,
+    UserInputResult,
 } from "./type";
 import type { ToolRegistry } from "./tool";
+import {
+    ASK_USER_TOOL_NAME,
+    HOST_TOOL_DEFINITIONS,
+    formatUserInputResult,
+    parseUserInputRequest,
+    validateUserInputResult,
+} from "./host-tool";
 
 function emptyUsage(): ChatUsage{
     return {
@@ -363,6 +372,9 @@ export type RunOptions = {
 
     /** 工具进度事件延迟（毫秒），默认 DEFAULT_TOOL_PROGRESS_DELAY_MS */
     toolProgressDelayMs?: number;
+
+    /** 是否向模型暴露 host__ask_user，默认 true */
+    enableUserInput?: boolean;
 };
 
 /** 运行上下文 */
@@ -400,6 +412,12 @@ export type RunContext = {
 
     /** 工具进度事件延迟（毫秒） */
     toolProgressDelayMs: number;
+
+    /** 是否启用 host 内置工具（ask_user） */
+    enableUserInput: boolean;
+
+    /** 请求人工输入；返回用户回答 */
+    requestUserInput: (request: UserInputRequest, call: ToolCall) => Promise<UserInputResult>;
 
     /** 请求人工审批；返回 abort 表示运行已取消 */
     requestApproval: (request: ToolApprovalRequest) => Promise<ToolApprovalResult>;
@@ -509,9 +527,15 @@ export class RunEngine{
 
     /** 取本次运行的工具快照；工具集在整轮运行内保持稳定 */
     private async _resolveTools(ctx: RunContext): Promise<ToolDefinition[]>{
-        if (ctx.tools === undefined) return [];
+        const tools: ToolDefinition[] = ctx.tools === undefined
+            ? []
+            : await ctx.tools.listTools(ctx.signal);
 
-        const tools = await ctx.tools.listTools(ctx.signal);
+        // host 工具本身依赖工具调用能力；不支持工具的 Provider 保持纯对话
+        if (ctx.enableUserInput && ctx.llm.supportsTools){
+            tools.push(...HOST_TOOL_DEFINITIONS);
+        }
+
         if (tools.length > 0 && !ctx.llm.supportsTools){
             throw new SessionError(
                 SessionErrorType.MissingTools,
@@ -532,13 +556,6 @@ export class RunEngine{
         calls: readonly ToolCall[],
     ): Promise<void>{
         const toolkit = ctx.tools;
-        if (toolkit === undefined){
-            throw new SessionError(
-                SessionErrorType.MissingTools,
-                "Model requested tools but no tool source was provided for this run",
-            );
-        }
-
         if (calls.length === 0) return;
 
         const definitions = calls.map(
@@ -556,7 +573,8 @@ export class RunEngine{
             (definition) => definition?.annotations?.concurrencySafe === true,
         );
 
-        if (!willAskApproval
+        if (toolkit !== undefined
+            && !willAskApproval
             && calls.length > 1
             && ctx.toolConcurrency > 1
             && allConcurrencySafe){
@@ -570,7 +588,7 @@ export class RunEngine{
     /** 顺序执行一批工具调用 */
     private async _runToolsSequentially(
         ctx: RunContext,
-        toolkit: ToolSource,
+        toolkit: ToolSource | undefined,
         calls: readonly ToolCall[],
         definitions: readonly (ToolDefinition | null)[],
     ): Promise<void>{
@@ -636,13 +654,25 @@ export class RunEngine{
      */
     private async _invokeTool(
         ctx: RunContext,
-        toolkit: ToolSource,
+        toolkit: ToolSource | undefined,
         call: ToolCall,
         definition: ToolDefinition | null,
     ): Promise<ToolCallResult | null>{
         if (ctx.signal.aborted) return null;
 
         ctx.emit({ type: SessionEventType.TOOL_CALL_START, call });
+
+        // host 内置工具：人工输入（不经过 ToolRegistry）
+        if (ctx.enableUserInput && ctx.llm.supportsTools && call.name === ASK_USER_TOOL_NAME){
+            return await this._askUser(ctx, call);
+        }
+
+        if (toolkit === undefined){
+            throw new SessionError(
+                SessionErrorType.MissingTools,
+                "Model requested tools but no tool source was provided for this run",
+            );
+        }
 
         const annotations = definition?.annotations;
         const readOnly = annotations?.readOnlyHint === true;
@@ -680,6 +710,54 @@ export class RunEngine{
             progressToken: call.id,
             onProgress: this._createProgressHandler(ctx, call, startedAt),
         });
+    }
+
+    /** 处理 host__ask_user：暂停等待用户作答 */
+    private async _askUser(ctx: RunContext, call: ToolCall): Promise<ToolCallResult>{
+        const startedAt = Date.now();
+        const parsed = parseUserInputRequest(call);
+        if (!parsed.ok){
+            return toolErrorResult(new ToolError(
+                ToolErrorType.InvalidParams,
+                false,
+                `Invalid ask_user parameters: ${parsed.message}`,
+            ));
+        }
+
+        const result = await ctx.requestUserInput(parsed.request, call);
+        const duration = Math.max(0, Math.round(performance.now() - startedAt));
+
+        if (result.cancelled === true){
+            return {
+                content: "User cancelled the input request",
+                status: {
+                    isSuccess: false,
+                    error: new ToolError(
+                        ToolErrorType.Denied,
+                        false,
+                        "User cancelled the input request",
+                    ),
+                    duration,
+                },
+                structuredContent: {
+                    requestId: parsed.request.id,
+                    answers: [],
+                    cancelled: true,
+                },
+            };
+        }
+
+        return {
+            content: formatUserInputResult(parsed.request, result),
+            status: {
+                isSuccess: true,
+                duration,
+            },
+            structuredContent: {
+                requestId: parsed.request.id,
+                answers: result.answers,
+            },
+        };
     }
 
     /** 生成进度回调：先存储最新值，超过延迟阈值再向前端发事件 */
@@ -734,6 +812,12 @@ export class Session{
         resolve: (result: ToolApprovalResult) => void;
     } | null = null;
 
+    /** 等待人工输入的表单；同一时刻最多一个 */
+    private _userInput: {
+        request: UserInputRequest;
+        resolve: (result: UserInputResult) => void;
+    } | null = null;
+
     constructor(
         llm?: LLMProvider,
         history?: SessionHistory,
@@ -762,6 +846,11 @@ export class Session{
     /** 获取当前运行中某次工具调用的最新进度 */
     getToolProgress(callId: string): ToolProgress | undefined{
         return this._activeRun?.getToolProgress(callId);
+    }
+
+    /** 当前待填写的人工输入表单；null 表示没有 */
+    get pendingUserInput(): UserInputRequest | null{
+        return this._userInput?.request ?? null;
     }
 
     /** 会话状态由 activeRun/RunStatus 派生，不单独保存一份状态 */
@@ -814,12 +903,19 @@ export class Session{
         if (this._abortController.signal.aborted) return;
 
         const pending = this._takeApproval();
+        const pendingInput = this._userInput;
+        this._userInput = null;
 
         this._activeRun.markAborting();
         this._emit({ type: SessionEventType.STATE_CHANGE, state: this.state });
         this._emit({ type: SessionEventType.USER_ABORT });
         this._abortController.abort();
         pending?.resolve("abort");
+        pendingInput?.resolve({
+            requestId: pendingInput.request.id,
+            answers: [],
+            cancelled: true,
+        });
     }
 
     /** 提交审批结果并恢复被暂停的运行
@@ -836,6 +932,26 @@ export class Session{
         run.resume();
         this._emit({ type: SessionEventType.STATE_CHANGE, state: this.state });
         pending.resolve(decision);
+        return true;
+    }
+
+    /** 提交人工输入结果并恢复运行
+     * @returns 无待处理表单、requestId 不匹配或答案非法时返回 false
+     */
+    respondUserInput(result: UserInputResult): boolean{
+        const pending = this._userInput;
+        if (pending === null) return false;
+        if (result.requestId !== pending.request.id) return false;
+
+        if (result.cancelled !== true){
+            const problems = validateUserInputResult(pending.request, result);
+            if (problems.length > 0) return false;
+        }
+
+        this._userInput = null;
+        this._activeRun?.resume();
+        this._emit({ type: SessionEventType.STATE_CHANGE, state: this.state });
+        pending.resolve(result);
         return true;
     }
 
@@ -895,6 +1011,14 @@ export class Session{
             );
         }
 
+        const enableUserInput = options.enableUserInput ?? true;
+        if (typeof enableUserInput !== "boolean"){
+            throw new SessionError(
+                SessionErrorType.InvalidRequest,
+                `enableUserInput must be a boolean, got ${String(options.enableUserInput)}`,
+            );
+        }
+
         const history = this._currentSession;
         const llm = this._llm;
         const inputMessage = user(input);
@@ -921,6 +1045,8 @@ export class Session{
             toolConcurrency,
             permission,
             toolProgressDelayMs,
+            enableUserInput,
+            requestUserInput: (request, call) => this._requestUserInput(request, call),
             requestApproval: (request) => this._requestApproval(request),
         };
 
@@ -955,12 +1081,46 @@ export class Session{
             const pending = this._takeApproval();
             pending?.resolve("abort");
 
+            const pendingInput = this._userInput;
+            this._userInput = null;
+            pendingInput?.resolve({
+                requestId: pendingInput.request.id,
+                answers: [],
+                cancelled: true,
+            });
+
             if (this._activeRun === run){
                 this._activeRun = null;
             }
             this._abortController = null;
             this._emit({ type: SessionEventType.STATE_CHANGE, state: this.state });
         }
+    }
+
+    /** 请求人工输入；由 RunEngine 在调用 host__ask_user 时调用 */
+    private _requestUserInput(
+        request: UserInputRequest,
+        call: ToolCall,
+    ): Promise<UserInputResult>{
+        const run = this._activeRun;
+        if (run === null || this._abortController?.signal.aborted === true){
+            return Promise.resolve({
+                requestId: request.id,
+                answers: [],
+                cancelled: true,
+            });
+        }
+
+        return new Promise<UserInputResult>((resolve) => {
+            this._userInput = { request, resolve };
+            run.markPaused();
+            this._emit({ type: SessionEventType.STATE_CHANGE, state: this.state });
+            this._emit({
+                type: SessionEventType.TOOL_INPUT_REQUIRED,
+                call,
+                request,
+            });
+        });
     }
 
     /** 请求人工审批；由 RunEngine 在工具调用前调用 */

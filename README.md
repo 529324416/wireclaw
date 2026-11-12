@@ -85,6 +85,11 @@ CLI 命令：
   - 工具通过 `onProgress` 主动上报进度；
   - Session 只有在调用超过 `toolProgressDelayMs`（默认 5s）后才发出 `TOOL_PROGRESS` 事件；
   - 前端可以监听事件决定是否展示，也可以随时通过 `session.getToolProgress(callId)` / `run.getToolProgress(callId)` 查询最新值。
+- host 内置工具 `host__ask_user`（人工选择题）：
+  - **不需要注册到 ToolRegistry**，Session 会自动注入定义；
+  - 模型调用后 run 进入暂停，发出 `TOOL_INPUT_REQUIRED` 事件；
+  - 前端通过 `session.respondUserInput(...)` 提交答案，答案以 ToolMessage 返回模型；
+  - 默认开启，可用 `run(..., { enableUserInput: false })` 关闭；不支持工具调用的 Provider 不会被注入。
 - 三档权限：
   - `readonly`：只允许 `readOnlyHint === true` 的工具，其余直接拒绝
   - `approval`：`requiresApproval` 的工具暂停等待人工审批
@@ -260,6 +265,7 @@ npx tsx test/approval-concurrency.ts
 npx tsx test/local-tools.ts
 npx tsx test/permission.ts
 npx tsx test/serialize-tool.ts
+npx tsx test/user-input.ts
 npx tsx test/mcp-client.ts
 npx tsx test/mcp-provider.ts
 npx tsx test/mcp-http.ts
