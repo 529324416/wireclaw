@@ -2,10 +2,10 @@ import { lstat, mkdir, open, realpath, writeFile } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
-import { InvalidParameterError } from "../base";
-import { ToolError, ToolErrorType } from "../session/error";
-import type { ToolCall, ToolCallResult, ToolDefinition } from "../session/type";
-import type { ToolCallOptions, ToolProvider } from "../session/tool";
+import { InvalidParameterError } from "../../base";
+import { ToolError, ToolErrorType } from "../../session/error";
+import type { ToolCall, ToolCallResult, ToolDefinition } from "../../session/type";
+import type { ToolCallOptions, ToolProvider } from "../../session/tool";
 
 /** 默认单次读取上限：256 KiB */
 const DEFAULT_MAX_READ_BYTES = 256 * 1024;

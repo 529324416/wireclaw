@@ -3,7 +3,8 @@ import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
-import { LocalToolProvider, OllamaLLMProvider } from "./src/platform/index";
+import { OllamaLLMProvider } from "./src/platform/index";
+import { LocalToolProvider } from "./src/tool/index";
 import {
     DEFAULT_SESSION_PERMISSION,
     RunStatus,
