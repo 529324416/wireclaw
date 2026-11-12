@@ -5,6 +5,7 @@ import type { Message } from "./message";
 import type { LLMProvider } from "./protocol";
 import {
     ChatRoleAssistant,
+    SessionPermission,
     SessionState,
     SessionEventType,
 } from "./type";
@@ -300,6 +301,9 @@ export const DEFAULT_MAX_STEPS = 16;
 /** 默认工具并发上限（1 = 顺序执行） */
 export const DEFAULT_TOOL_CONCURRENCY = 1;
 
+/** 默认会话权限：审批类工具需要人工确认 */
+export const DEFAULT_SESSION_PERMISSION = SessionPermission.Approval;
+
 /** Session 在一次运行中需要的工具能力；ToolRegistry 天然满足该结构 */
 export type ToolSource = Pick<ToolRegistry, "listTools" | "invoke">;
 
@@ -330,6 +334,9 @@ export type RunOptions = {
 
     /** 单批工具调用的最大并发数，默认 DEFAULT_TOOL_CONCURRENCY */
     toolConcurrency?: number;
+
+    /** 本次运行的权限等级，默认 DEFAULT_SESSION_PERMISSION */
+    permission?: SessionPermission;
 };
 
 /** 运行上下文 */
@@ -361,6 +368,9 @@ export type RunContext = {
 
     /** 单批工具调用的最大并发数 */
     toolConcurrency: number;
+
+    /** 本次运行的权限等级 */
+    permission: SessionPermission;
 
     /** 请求人工审批；返回 abort 表示运行已取消 */
     requestApproval: (request: ToolApprovalRequest) => Promise<ToolApprovalResult>;
@@ -485,7 +495,7 @@ export class RunEngine{
 
     /** 执行一轮助手消息中的工具调用
      * @note 并发策略属于 AgentLoop 的职责，Registry 只负责工具范围
-     * @note 只要本批存在需要审批的调用，就退化为顺序执行，保证同一时刻只有一个审批
+     * @note approval 模式下只要本批存在需要审批的调用，就退化为顺序执行，保证同一时刻只有一个审批
      */
     private async _runTools(
         ctx: RunContext,
@@ -506,16 +516,18 @@ export class RunEngine{
             (call) => tools.find((item) => item.name === call.name) ?? null,
         );
 
-        const needsApproval = definitions.some(
-            (definition) => definition?.annotations?.requiresApproval === true,
-        );
+        // 只有 approval 模式下审批类工具才会真正暂停；full 模式可以并行
+        const willAskApproval = ctx.permission === SessionPermission.Approval
+            && definitions.some(
+                (definition) => definition?.annotations?.requiresApproval === true,
+            );
 
         // 只有并发安全的工具才支持并发执行
         const allConcurrencySafe = definitions.every(
             (definition) => definition?.annotations?.concurrencySafe === true,
         );
 
-        if (!needsApproval
+        if (!willAskApproval
             && calls.length > 1
             && ctx.toolConcurrency > 1
             && allConcurrencySafe){
@@ -596,12 +608,33 @@ export class RunEngine{
 
         ctx.emit({ type: SessionEventType.TOOL_CALL_START, call });
 
-        if (definition?.annotations?.requiresApproval === true){
+        const annotations = definition?.annotations;
+        const readOnly = annotations?.readOnlyHint === true;
+        const requiresApproval = annotations?.requiresApproval === true;
+
+        // 只读模式：只允许只读工具，其余直接拒绝
+        if (ctx.permission === SessionPermission.ReadOnly && !readOnly){
+            return deniedByPermissionResult(call, ctx.permission);
+        }
+
+        // 审批模式：审批类工具先暂停等待人工决定
+        if (ctx.permission === SessionPermission.Approval && requiresApproval){
             const decision = await ctx.requestApproval({ call, tool: definition });
 
             // 取消也物化成结果，保证 TOOL_CALL_START / TOOL_CALL_END 成对
             if (decision === "abort" || ctx.signal.aborted) return abortedResult(call);
             if (decision === "deny") return deniedResult(call);
+        }
+
+        // 完全权限：审批类/破坏性工具直接放行，但发出危险警告
+        if (ctx.permission === SessionPermission.Full
+            && (requiresApproval || annotations?.destructiveHint === true)){
+            ctx.emit({
+                type: SessionEventType.TOOL_PERMISSION_WARNING,
+                call,
+                tool: definition,
+                message: `Executing "${call.name}" without approval in full permission mode`,
+            });
         }
 
         return await toolkit.invoke(call, { signal: ctx.signal });
@@ -748,7 +781,7 @@ export class Session{
      * 失败或取消时直接丢弃 pending，历史保持干净。
      *
      * @param input 用户输入
-     * @param options 运行选项（工具集、最大轮数）
+     * @param options 运行选项（工具集、最大轮数、并发与权限）
      */
     async run(input: MessageContent, options: RunOptions = {}): Promise<Run>{
         if (this._activeRun !== null){
@@ -777,6 +810,16 @@ export class Session{
             );
         }
 
+        const permission = options.permission ?? DEFAULT_SESSION_PERMISSION;
+        if (permission !== SessionPermission.ReadOnly
+            && permission !== SessionPermission.Approval
+            && permission !== SessionPermission.Full){
+            throw new SessionError(
+                SessionErrorType.InvalidRequest,
+                `permission must be "readonly", "approval" or "full", got ${String(options.permission)}`,
+            );
+        }
+
         const history = this._currentSession;
         const llm = this._llm;
         const inputMessage = user(input);
@@ -801,6 +844,7 @@ export class Session{
             tools: options.tools,
             maxSteps,
             toolConcurrency,
+            permission,
             requestApproval: (request) => this._requestApproval(request),
         };
 
@@ -899,7 +943,6 @@ function toolErrorResult(error: ToolError): ToolCallResult{
         status: {
             isSuccess: false,
             error,
-            retryable: error.retryable,
             duration: 0,
         },
         structuredContent: undefined,
@@ -914,6 +957,17 @@ function deniedResult(call: ToolCall): ToolCallResult{
             ToolErrorType.Denied,
             false,
             `Tool call "${call.name}" was denied by the user`,
+        ),
+    );
+}
+
+/** 只读模式下拒绝非只读工具 */
+function deniedByPermissionResult(call: ToolCall, permission: SessionPermission): ToolCallResult{
+    return toolErrorResult(
+        new ToolError(
+            ToolErrorType.Denied,
+            false,
+            `Tool call "${call.name}" is not allowed while the session permission is "${permission}"`,
         ),
     );
 }

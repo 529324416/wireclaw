@@ -438,7 +438,6 @@ export class ToolRegistry {
             status: {
                 isSuccess: false,
                 error,
-                retryable: error.retryable,
                 duration: durationMs,
             },
             structuredContent: undefined,

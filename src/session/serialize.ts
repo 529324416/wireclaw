@@ -8,6 +8,7 @@ import {
     isJsonSafe,
     SerializationError,
 } from "../base";
+import { ToolError, ToolErrorType } from "./error";
 import { AssistantMessage, SystemMessage, ToolMessage, UserMessage } from "./message";
 import type { Message } from "./message";
 import { SessionHistory } from "./session";
@@ -33,6 +34,7 @@ import type {
     SessionData,
     ToolCall,
     ToolCallStatus,
+    ToolCallStatusData,
 } from "./type";
 
 import { cloneMessageContent, cloneToolCalls } from "./utils";
@@ -100,8 +102,30 @@ export class MessageSerializer{
             ...MessageSerializer.serializeBase(message),
             toolName: message.toolName,
             callId: message.callId,
-            details: message.details,
+            details: MessageSerializer.serializeToolDetails(message.details),
         }
+    }
+
+    /** 序列化工具调用详情
+     * @note ToolError 是运行期实例，这里只保留可持久化的 type / retryable / message
+     */
+    static serializeToolDetails(details: ToolCallStatus): ToolCallStatusData{
+        if (details.error === undefined){
+            return {
+                isSuccess: details.isSuccess,
+                duration: details.duration,
+            };
+        }
+
+        return {
+            isSuccess: details.isSuccess,
+            duration: details.duration,
+            error: {
+                type: details.error.type,
+                retryable: details.error.retryable,
+                message: details.error.message,
+            },
+        };
     }
 
     /** 反序列化消息
@@ -296,13 +320,25 @@ export class MessageSerializer{
     /** 反序列化工具调用详情 */
     private static _deserializeToolDetails(value: unknown, field: string): ToolCallStatus{
         const record = asRecord(value, field);
+        const error = MessageSerializer._deserializeToolError(record.error, `${field}.error`);
+
         return {
             isSuccess: asBoolean(record.isSuccess, `${field}.isSuccess`),
             duration: asNonNegativeNumber(record.duration, `${field}.duration`),
-            failureInfo: record.failureInfo === undefined
-                ? undefined
-                : asString(record.failureInfo, `${field}.failureInfo`),
+            ...(error === undefined ? {} : { error }),
         };
+    }
+
+    /** 反序列化工具错误；字段缺失时返回 undefined */
+    private static _deserializeToolError(value: unknown, field: string): ToolError | undefined{
+        if (value === undefined || value === null) return undefined;
+
+        const record = asRecord(value, field);
+        return new ToolError(
+            asEnum(record.type, Object.values(ToolErrorType) as ToolErrorType[], `${field}.type`),
+            asBoolean(record.retryable, `${field}.retryable`),
+            asString(record.message, `${field}.message`),
+        );
     }
 }
 

@@ -26,6 +26,6 @@
     "resolveJsonModule": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist", "test", "test.ts", "client.ts"]
+  "include": ["src/**/*.ts", "client.ts"],
+  "exclude": ["node_modules", "dist", "test", "test.ts"]
 }

@@ -1,6 +1,6 @@
 /* Session模块类型定义 */
 
-import { ToolError } from "./error";
+import { ToolError, type ToolErrorType } from "./error";
 import type { AssistantMessage } from "./message";
 
 /** 附件引用 */
@@ -26,23 +26,43 @@ export type ToolCall = {
     params: Record<string, unknown>;
 }
 
-/** 包含工具调用后的状态信息 */
+/** 包含工具调用后的状态信息（运行期，error 是 ToolError 实例） */
 export type ToolCallStatus = {
     /** 是否成功 */
     isSuccess: boolean;
-    
+
     /** 耗时（毫秒） */
     duration: number;
 
-    /** 工具调用错误类型 */
+    /** 工具调用错误 */
     error?: ToolError;
+}
+
+/** 工具错误的可序列化数据 */
+export type ToolErrorData = {
+    /** 错误类型 */
+    type: ToolErrorType;
 
     /** 是否可重试 */
-    retryable?: boolean;
+    retryable: boolean;
 
-    /** @deprecated 旧序列化字段；工具/附件模块完成后随 ToolCallStatus 一起重构 */
-    failureInfo?: string;
-}
+    /** 错误消息 */
+    message: string;
+};
+
+/** 工具调用状态的可序列化数据
+ * @note error 必须是 plain object；ToolError 实例不能直接持久化
+ */
+export type ToolCallStatusData = {
+    /** 是否成功 */
+    isSuccess: boolean;
+
+    /** 耗时（毫秒） */
+    duration: number;
+
+    /** 工具调用错误数据 */
+    error?: ToolErrorData;
+};
 
 /** 工具调用结果 */
 export type ToolCallResult = {
@@ -121,7 +141,7 @@ export type MessageDataAssistant = MessageDataBase & {
     failureReason?: ChatFailureReason | undefined; 
     stopReason?: ChatStopReason | undefined; };
 export type MessageDataSystem = MessageDataBase & { role: typeof ChatRoleSystem };
-export type MessageDataTool = MessageDataBase & { role: typeof ChatRoleTool, toolName: string, callId: string, details: ToolCallStatus };
+export type MessageDataTool = MessageDataBase & { role: typeof ChatRoleTool, toolName: string, callId: string, details: ToolCallStatusData };
 
 /** 消息数据 */
 export type MessageData = 
@@ -176,6 +196,9 @@ export const SessionEventType = {
     /** 工具调用需要人工审批（会话进入暂停状态） */
     TOOL_APPROVAL_REQUIRED: 'tool_approval_required',
 
+    /** 工具在完全权限模式下未经审批直接执行（危险警告） */
+    TOOL_PERMISSION_WARNING: 'tool_permission_warning',
+
     /** 用户终止 */
     USER_ABORT: 'user_abort',
 
@@ -206,6 +229,7 @@ export type SessionEvent =
     | { type: typeof SessionEventType.TOOL_CALL_START, call: ToolCall }
     | { type: typeof SessionEventType.TOOL_CALL_END, call: ToolCall, result: ToolCallResult }
     | { type: typeof SessionEventType.TOOL_APPROVAL_REQUIRED, call: ToolCall, tool: ToolDefinition | null }
+    | { type: typeof SessionEventType.TOOL_PERMISSION_WARNING, call: ToolCall, tool: ToolDefinition | null, message: string }
 
     // 用户操作
     | { type: typeof SessionEventType.USER_ABORT }
@@ -225,6 +249,18 @@ export const SessionState = {
     Interrupt: "interrupt",     // 遇到各类非用户中断的其他情况，例如断电、程序被强制关闭等情况导致会话强行中断
 } as const;
 export type SessionState = (typeof SessionState)[keyof typeof SessionState];
+
+/** 会话权限等级
+ * - readonly：只允许只读工具，其余直接拒绝
+ * - approval：审批类工具需要人工确认
+ * - full：审批类/破坏性工具直接放行，但会发出危险警告
+ */
+export const SessionPermission = {
+    ReadOnly: "readonly",
+    Approval: "approval",
+    Full: "full",
+} as const;
+export type SessionPermission = (typeof SessionPermission)[keyof typeof SessionPermission];
 
 /** 模型思考等级 */
 export type ModelThinkingLevel = string | number;
