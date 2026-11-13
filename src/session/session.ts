@@ -1,6 +1,6 @@
 import { uniqueId } from "../base";
-import type { IFileHost } from "../file";
 import { SessionError, SessionErrorType, ToolError, ToolErrorType } from "./error";
+import type { IFileHost } from "./file";
 import { AssistantMessage, ToolMessage, tool, user } from "./message";
 import type { Message } from "./message";
 import type { LLMProvider } from "./protocol";

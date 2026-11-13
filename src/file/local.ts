@@ -1,9 +1,9 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { AttachmentFile } from "./file";
-import type { IFileHost } from "./file";
-import type { FileContent } from "./type";
+import { AttachmentFile } from "../session/file";
+import type { IFileHost } from "../session/file";
+import type { FileContent } from "../session/type";
 
 /** 内容指纹文件名格式，避免路径注入 */
 const CONTENT_HASH_PATTERN = /^[a-f0-9]{64}$/;

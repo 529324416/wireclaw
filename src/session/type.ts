@@ -484,3 +484,6 @@ export type ToolDefinition = {
     /** 工具来源；Provider 可以留空，由 ToolRegistry 填充 */
     source?: ToolDefinitionSource;
 };
+
+/** 文件内容：统一使用字节数组，文本按 UTF-8 编码后存储 */
+export type FileContent = Uint8Array;
