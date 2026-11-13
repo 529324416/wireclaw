@@ -1,6 +1,8 @@
 # Rotom TODO
 
-## 先回答：MCP 的能力边界
+## 工具系统
+
+### 先回答：MCP 的能力边界
 
 Rotom 目前实现的是 **MCP Client / Host**，不是 MCP Server；只覆盖 `tools` 子集。
 
@@ -14,8 +16,6 @@ MCP 并不只是「跨进程提供工具」：
 
 当前 `examples/mcp_server.py` 只是验证用的最小 Server。
 
-## 已完成
-
 - [x] JSON-RPC 2.0 请求 / 响应 / 通知
 - [x] `initialize` 握手、版本协商、`notifications/initialized`
 - [x] `tools/list`（分页、去重）、`tools/call`、`ping`
@@ -24,11 +24,6 @@ MCP 并不只是「跨进程提供工具」：
 - [x] 工具名消毒 / 反向映射、注解与审批推导、结果与错误映射
 - [x] Registry 缓存失效、`closeAll`、Provider 错误隔离
 - [x] CLI 接入、`/tools`、Flask 示例、README
-
-## 待办
-
-### 稳定性
-
 - [x] 传输关闭后的自动重连（Client `reconnect` + Provider 单次重试）
 - [x] 工具列表缓存 TTL（HTTP 下及时感知工具变化）
 - [x] HTTP 会话：`DELETE` 关闭
@@ -44,40 +39,6 @@ MCP 并不只是「跨进程提供工具」：
 - [x] 进度探针 API（按 `callId` 查询 + 延迟 5s 的 `TOOL_PROGRESS` 事件）
 - [x] `host__ask_user` 人工选择题（Session 自动注入，可用 `enableUserInput` 关闭）
 - [ ] 工具结果信任标记（不可信外部内容的提示/隔离）
-
-### 附件系统
-
-#### 已完成
-
-- [x] 内容寻址（SHA-256 contentHash）
-- [x] `AttachmentFile` / `IFileHost` / `LocalFileHost`
-- [x] `AttachmentRef` 只保存 contentHash，严格序列化
-- [x] `CloudFileManager` / `RemoteFileRef` / `AttachmentWireMap`
-- [x] Session 发送前解析附件并注入 `ChatOptions`
-- [x] Provider 切换时保留历史、按新 Provider 重新解析附件
-- [x] Ollama 图片 inline base64
-- [x] DeepSeek Files API 上传、3h TTL、校验、404/410 重传
-- [x] 图片 magic-byte 校验、路径不可见字符清理
-- [x] 上传 single-flight / 本地文件去重
-
-#### 待办
-
-- [ ] 浏览器/Electron 版 `IFileHost`（IndexedDB / OPFS / 原生文件系统）
-- [ ] 包入口拆分与条件导出，隔离 `node:fs` / `node:child_process` 等 Node-only 模块
-- [ ] 统一 `AttachmentFileError` 错误类型（本地缺失、远端缺失、上传失败、网络、类型、超限）
-- [ ] 文件生命周期：引用计数、Pin、压缩/归档/删除、孤儿清理、存储配额
-- [ ] 共享 Provider 下的上传取消语义与等待者隔离
-- [ ] 大文件流式读取/哈希/上传（当前主要在内存中处理）
-- [ ] 图片预处理：尺寸/EXIF/压缩、token 估算、单请求图片数量限制
-- [ ] MCP `image` / `audio` / `resource` 接入 `IFileHost`，替换文本占位
-- [ ] 助手流式附件输出（`ASSISTANT_TOKEN_ATTACHMENT` 尚未使用）
-- [ ] 远端文件清理/删除策略、缓存持久化与重启重建
-- [ ] 恢复会话时的附件存在性校验与缺失文件 UX
-- [ ] URL 附件的长度限制、下载超时与 SSRF 防护
-- [ ] 安全：恶意文件、MIME 欺骗、多租户隔离、上传隐私/同意提示
-- [ ] UI 缩略图/大文件流式渲染
-- [ ] 更多 Provider 附件协议（OpenAI / Anthropic / Gemini 等）
-- [ ] 补充实机测试：TTL 过期重传、跨 Provider 附件、并发上传、浏览器宿主
 
 ### 协议广度
 
@@ -99,7 +60,42 @@ MCP 并不只是「跨进程提供工具」：
 - [ ] 指标、审计、限流 —— 暂缓
 - [ ] Rotom 作为 MCP Server 的多客户端并发支持（远期）
 
-## 你的反馈记录
+## 附件系统
+
+### 已完成
+
+- [x] 内容寻址（SHA-256 contentHash）
+- [x] `AttachmentFile` / `IFileHost` / `LocalFileHost`
+- [x] `AttachmentRef` 只保存 contentHash，严格序列化
+- [x] `CloudFileManager` / `RemoteFileRef` / `AttachmentWireMap`
+- [x] Session 发送前解析附件并注入 `ChatOptions`
+- [x] Provider 切换时保留历史、按新 Provider 重新解析附件
+- [x] Ollama 图片 inline base64
+- [x] DeepSeek Files API 上传、3h TTL、校验、404/410 重传
+- [x] 图片 magic-byte 校验、路径不可见字符清理
+- [x] 上传 single-flight / 本地文件去重
+
+### 待办
+
+- [ ] 浏览器/Electron 版 `IFileHost`（IndexedDB / OPFS / 原生文件系统）
+- [ ] 包入口拆分与条件导出，隔离 `node:fs` / `node:child_process` 等 Node-only 模块
+- [ ] 统一 `AttachmentFileError` 错误类型（本地缺失、远端缺失、上传失败、网络、类型、超限）
+- [ ] 文件生命周期：引用计数、Pin、压缩/归档/删除、孤儿清理、存储配额
+- [ ] 共享 Provider 下的上传取消语义与等待者隔离
+- [ ] 大文件流式读取/哈希/上传（当前主要在内存中处理）
+- [ ] 图片预处理：尺寸/EXIF/压缩、token 估算、单请求图片数量限制
+- [ ] MCP `image` / `audio` / `resource` 接入 `IFileHost`，替换文本占位
+- [ ] 助手流式附件输出（`ASSISTANT_TOKEN_ATTACHMENT` 尚未使用）
+- [ ] 远端文件清理/删除策略、缓存持久化与重启重建
+- [ ] 恢复会话时的附件存在性校验与缺失文件 UX
+- [ ] URL 附件的长度限制、下载超时与 SSRF 防护
+- [ ] 安全：恶意文件、MIME 欺骗、多租户隔离、上传隐私/同意提示
+- [ ] UI 缩略图/大文件流式渲染
+- [ ] 更多 Provider 附件协议（OpenAI / Anthropic / Gemini 等）
+- [ ] 补充实机测试：TTL 过期重传、跨 Provider 附件、并发上传、浏览器宿主
+
+
+## 开发者反馈记录
 
 - 结果体量上限应放在工具契约层统一处理，而不是每个 MCP Server 单独配置。
 - `outputSchema` 校验做起来简单，结构错误应作为工具失败结果正常回传模型。
