@@ -48,6 +48,15 @@ export function asString(value: unknown, field: string): string{
     return value;
 }
 
+/** 读取必填非空字符串 */
+export function asNonEmptyString(value: unknown, field: string): string{
+    const text = asString(value, field);
+    if (text.length === 0){
+        throw new DeserializationError(`Invalid message data: ${field} should be a non-empty string`);
+    }
+    return text;
+}
+
 export function asBoolean(value: unknown, field: string): boolean{
     if (typeof value !== 'boolean'){
         throw new DeserializationError(`Invalid message data: ${field} should be a boolean`);

@@ -11,17 +11,23 @@
 - 本地工具（读/写文件，带工作区沙箱）
 - MCP 工具客户端（stdio / Streamable HTTP）
 - 图片附件（内容指纹 + 本地文件宿主；Ollama 以 inline base64 发送）
+- DeepSeek（Chat Completions + Files API，支持 `file_id` 上传复用）
+- 多 Provider 切换（Ollama / DeepSeek）
 - 会话序列化、保存/恢复
 
 ## 目录与架构
 
 ```
 src/
-  base/          纯原语（错误、JSON 工具、ID）
+  base/          纯原语（错误、JSON 工具、ID、编码）
+  file/          附件契约与文件宿主
+                 AttachmentFile / IFileHost / LocalFileHost / 图片类型识别
   session/       契约与运行时
                  ToolDefinition / ToolProvider / ToolRegistry、消息、事件、
-                 AgentLoop、审批状态机、序列化
-  platform/      LLM 平台实现（Ollama：ProtocolAdapter / LLMProvider / ModelProvider）
+                 AgentLoop、审批状态机、CloudFileManager、序列化
+  platform/      LLM 平台实现
+                 ollama.ts   ProtocolAdapter / ModelProvider / LLMProvider
+                 deepseek.ts ProtocolAdapter / ModelProvider / CloudFileManager / LLMProvider
   tool/          工具实现
     local/       LocalToolProvider（进程内文件工具）
     mcp/         MCP 客户端与 McpToolProvider
@@ -30,13 +36,13 @@ src/
 依赖方向是单向的：
 
 ```
-base  <-  tool  <-  session  <-  platform
+base  <-  file  <-  session  <-  platform
              ^          |
              |          |
-        （实现依赖契约，session 不依赖实现）
+        （实现依赖契约，session 不依赖具体实现）
 ```
 
-一句话：**session 只决定「如何与它交流、如何运行」；任何实现（本地工具、MCP、Ollama、未来的附件）都在外部。**
+一句话：**session 只决定「如何与它交流、如何运行」；任何实现（本地工具、MCP、Ollama、DeepSeek、附件宿主）都在外部。**
 
 ## 快速开始
 
@@ -45,7 +51,10 @@ npm install
 npx tsx client.ts
 ```
 
-前提：本机 Ollama 已启动（默认 `http://127.0.0.1:11434`），并有一个支持 tools 的模型（默认优先 `qwen3.5:9b`）。
+前提：
+
+- 使用 Ollama：本机 Ollama 已启动（默认 `http://127.0.0.1:11434`），并有一个支持 tools 的模型（默认优先 `qwen3.5:9b`）；图片输入需要 vision 模型。
+- 使用 DeepSeek：准备 API key（`DEEPSEEK_API_KEY` 或 `./ds-apikey.txt`），无需启动 Ollama。
 
 环境变量：
 
@@ -53,23 +62,186 @@ npx tsx client.ts
 |---|---|---|
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama 地址 |
 | `OLLAMA_MODEL` | 自动（优先 qwen3.5:9b） | 模型名 |
+| `ROTOM_PROVIDER` | `ollama` | 启动时使用的 LLM Provider：`ollama` / `deepseek` |
 | `ROTOM_MCP_URL` | `http://127.0.0.1:5000/mcp` | MCP Server 地址 |
 | `ROTOM_MCP_ID` | `mcp` | MCP 工具的 Provider 前缀 |
 | `ROTOM_MCP_DISABLE` | 未设置 | 设为 `1` 时不注册 MCP |
 | `ROTOM_FILES_DIR` | `./.rotom-files` | 本地附件仓库目录 |
+| `DEEPSEEK_API_KEY` | 未设置 | 直接指定 DeepSeek API key（优先于文件） |
+| `DEEPSEEK_API_KEY_FILE` | `./ds-apikey.txt` | DeepSeek API key 文件 |
+| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | DeepSeek API 地址 |
+| `DEEPSEEK_MODEL` | `deepseek-flash` | DeepSeek 默认模型 |
 
 CLI 命令：
 
 | 命令 | 说明 |
 |---|---|
 | `/exit` | 退出 |
-| `/model <name>` | 切换模型 |
-| `/list_models` | 列出 Ollama 模型及能力 |
+| `/provider [providerId]` | 查看/切换 LLM Provider：`ollama` / `deepseek` |
+| `/model <name>` | 切换当前 Provider 的模型 |
+| `/list_models` | 列出当前 Provider 的模型及能力 |
 | `/tools` | 列出当前可用工具（含 MCP） |
 | `/permission [readonly\|approval\|full]` | 查看/切换权限 |
 | `/upload <image-path>` | 追加一个图片附件（jpg/jpeg/png/webp/gif），随下一条消息发送 |
 | `/save_session [path]` | 保存会话（默认 `./rotom-session.json`） |
 | `/restore_session [path]` | 恢复会话（会丢弃当前会话数据） |
+
+Provider 切换：
+
+- 默认使用 Ollama；启动时设置 `ROTOM_PROVIDER=deepseek` 可直接使用 DeepSeek。
+- `/provider deepseek` 会读取 `DEEPSEEK_API_KEY` 或 `./ds-apikey.txt`，不会把 key 写入日志或会话。
+- `/provider ollama` 可以切回本地模型。
+- 会话历史中只保存附件的 `contentHash`；切换 Provider 后，同一张图片会由新 Provider 的 `CloudFileManager` 重新解析/上传。
+
+## 附件系统（file + session 契约）
+
+### 设计原则
+
+- **历史只保存内容指纹**：消息里只出现 `contentHash`，不保存文件名、路径、MIME、字节、远端 fileId 或 URL。
+- **文件实体由宿主保存**：`IFileHost` 负责本地不可变文件存储，`Session` 不关心存储介质。
+- **远端表示由 Provider 负责**：`CloudFileManager` 负责上传、缓存、校验和过期处理。
+- **ProtocolAdapter 只做编码**：Adapter 不访问 `IFileHost`，按平台把附件编码成 base64 / data URL / file_id / URL。
+
+### 数据结构
+
+- `AttachmentRef = { contentHash: string }`
+- `AttachmentFile`
+  - `contentHash`：SHA-256 小写十六进制
+  - `name`
+  - `mimeType?`
+  - `content: Uint8Array`
+  - `size`
+  - 通过 `AttachmentFile.create()` 异步创建
+- `RemoteFileRef`
+  - `{ kind: "remote-id", fileId, ... }`
+  - `{ kind: "inline", data: Uint8Array, ... }`
+  - `{ kind: "url", url, ... }`
+- `AttachmentWireMap = ReadonlyMap<string, RemoteFileRef>`
+
+### IFileHost
+
+```ts
+put(name, content, mimeType?): Promise<AttachmentFile>
+get(contentHash): Promise<AttachmentFile | undefined>
+```
+
+- 底层只要求 `put` / `get`；
+- Node 端可以从路径读取后调用 `put`；
+- 浏览器端可以从 `File`/`Blob` 读取后调用 `put`；
+- `LocalFileHost` 是 Node 实现：
+  - 文件按内容指纹命名；
+  - 元数据存于 `<hash>.json`；
+  - 同内容去重，首次写入的名称/MIME 为准；
+  - 读取时校验指纹，损坏内容不会被当作有效附件。
+
+### Session 解析流程
+
+```text
+发送前收集本轮所有消息中的唯一 contentHash
+  → IFileHost.get
+  → CloudFileManager.ensureFile
+  → 构建 AttachmentWireMap
+  → 写入 ChatOptions.attachmentRefs
+  → ProtocolAdapter.toPayload
+```
+
+- `Session` 只在运行期持有 `AttachmentWireMap`，不持久化；
+- 切换 Provider、切换文件宿主或切换会话时清空；
+- 同一 `contentHash` 只解析一次；
+- 附件缺失、Provider 不支持附件时在调用模型前失败；
+- 失败运行不会污染历史。
+
+### Provider 实现
+
+- **Ollama**
+  - 没有文件上传协议；
+  - `OllamaCloudFileManager` 校验图片并返回 `inline`；
+  - Adapter 编码为 `images: [base64]`；
+  - 图片只允许出现在 user 消息。
+- **DeepSeek**
+  - 使用 Files API 上传，`purpose=user_data`；
+  - 默认设置 3 小时有效期，可配置或设为永久；
+  - 使用 `{ type: "file", file_id }` 引用；
+  - 每次使用前通过 `GET /files/{id}` 校验；
+  - 404/410 自动重新上传；
+  - 距离过期不足 5 分钟时主动重传；
+  - 同一 `contentHash` 并发 ensure 使用 single-flight。
+
+### 序列化
+
+- 严格 schema：附件只接受 `{ contentHash: string }`；
+- 空指纹、缺失字段、类型错误全部拒绝；
+- 不再兼容早期 `{ id }` 草稿；
+- 会话 JSON 不包含远端 fileId、URL、字节或 Provider 信息；
+- 会话 JSON 不是自包含的：恢复时必须由同一个 `IFileHost` 提供对应文件。
+
+### 限制
+
+- 当前支持 JPEG / PNG / GIF / WebP；
+- DeepSeek 单文件上限 64 MiB；
+- 上传/校验失败视为发送失败；
+- MCP 的 image/audio/resource 仍暂时转为文本占位，尚未接入 `IFileHost`。
+
+## DeepSeek 实现（platform/deepseek.ts）
+
+- Base URL：`https://api.deepseek.com`
+- Chat：`POST /chat/completions`，SSE 流式
+- Files：`POST /files`、`GET /files/{id}`、`DELETE /files/{id}`
+- 鉴权：`Authorization: Bearer <key>`
+
+### 组成
+
+- `DeepSeekProtocolAdapter`
+  - 文本 / system / assistant / tool 消息转换；
+  - `image_url` data URL、`file` file_id、tool calls；
+  - `reasoning_content` 回传；
+  - SSE chunk 解析。
+- `DeepSeekModelProvider`
+  - `GET /models`；
+  - 读取 `input_modalities`、`effort.supported_levels`、上下文/输出上限；
+  - `deepseek-flash` 支持图片，`deepseek-v4-pro` 为文本模型。
+- `DeepSeekCloudFileManager`
+  - 上传、缓存、校验、404 重传、TTL；
+  - 支持注入 `fetch`，方便浏览器/Electron 走宿主代理。
+- `DeepSeekLLMProvider`
+  - Chat Completions + SSE；
+  - `thinking` / `reasoning_effort` 映射；
+  - tool calls、usage、错误处理；
+  - 附件模型能力检查。
+
+### 思考模式映射
+
+- `think: false` → `thinking: { type: "disabled" }`
+- `think: true` → `thinking: { type: "enabled" }`
+- `thinkingLv` → `reasoning_effort: low | high | max`
+- 兼容别名：`minimal`→`low`、`medium`/`xhigh`→`high`、`ultra`→`max`
+
+### 配置
+
+```ts
+new DeepSeekLLMProvider({
+  apiKey,
+  baseUrl: "https://api.deepseek.com",
+  headers: {},
+  fetch: customFetch, // 可选
+  files: {
+    expiresAfterSeconds: 3 * 60 * 60, // 默认 3h；null 表示永久
+    verify: true,
+  },
+});
+```
+
+## 多 Provider
+
+- 启动时由 `ROTOM_PROVIDER=ollama|deepseek` 决定首选 Provider；
+- 首选不可用时自动尝试另一个；
+- `/provider` 查看 / 切换，Provider 实例与 CloudFileManager 缓存会被复用；
+- 切换保留会话历史；
+- 附件的远端表示会按新 Provider 重新解析；
+- DeepSeek key 读取顺序：
+  1. `DEEPSEEK_API_KEY`
+  2. `DEEPSEEK_API_KEY_FILE`（默认 `./ds-apikey.txt`）
+- key 不会写入日志、会话或源码；`ds-apikey.txt` 与 `.env*` 已在 `.gitignore` 中。
 
 ## 工具系统（session 契约）
 
@@ -172,7 +344,7 @@ MCP 工具名没有字符集限制，而模型侧只接受 `[A-Za-z0-9_-]`，且
 | MCP | Rotom |
 |---|---|
 | `content[].type === "text"` | 拼接为文本 |
-| `image` / `audio` / `resource` | 暂转文本占位（附件系统完成后升级） |
+| `image` / `audio` / `resource` | 暂转文本占位（尚未接入 IFileHost，后续升级） |
 | `structuredContent` | `ToolCallResult.structuredContent` |
 | `isError: true` | `isSuccess = false` + `ToolError(ProviderError)` |
 | JSON-RPC error | `ToolError(ProviderError)` |
@@ -264,10 +436,14 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:5000/mcp `
 npx tsx test/tool-registry.ts
 npx tsx test/tool-contract.ts
 npx tsx test/agent-loop.ts
+npx tsx test/deepseek-protocol.ts
+npx tsx test/attachment-protocol.ts
+npx tsx test/local-file-host.ts
 npx tsx test/approval-concurrency.ts
 npx tsx test/local-tools.ts
 npx tsx test/permission.ts
 npx tsx test/serialize-tool.ts
+npx tsx test/serialize-attachment.ts
 npx tsx test/user-input.ts
 npx tsx test/mcp-client.ts
 npx tsx test/mcp-provider.ts

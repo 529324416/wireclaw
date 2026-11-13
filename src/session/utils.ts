@@ -13,6 +13,10 @@ export function cloneMessageContent(content: MessageContent): MessageContent{
                 text: part.text,
             };
         }
+        if (part.attachment.contentHash.length === 0){
+            throw new SerializationError("Attachment contentHash should be a non-empty string");
+        }
+
         return {
             type: "attachment",
             attachment: {

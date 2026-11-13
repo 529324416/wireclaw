@@ -6,7 +6,11 @@ import { stdin as input, stdout as output } from "node:process";
 import { sanitizePathInput } from "./src/base";
 import { detectImageMimeType } from "./src/file";
 import { LocalFileHost } from "./src/file/local";
-import { OllamaLLMProvider } from "./src/platform/index";
+import {
+    DEEPSEEK_DEFAULT_BASE_URL,
+    DeepSeekLLMProvider,
+    OllamaLLMProvider,
+} from "./src/platform/index";
 import { createMcpProvider, LocalToolProvider } from "./src/tool/index";
 import {
     DEFAULT_SESSION_PERMISSION,
@@ -18,6 +22,7 @@ import {
     SessionSerializer,
     ToolRegistry,
 } from "./src/session/index";
+import type { LLMProvider } from "./src/session/protocol";
 import { SessionEventType } from "./src/session/type";
 import type {
     SessionEvent,
@@ -33,16 +38,22 @@ import type {
  *   npx tsx client.ts
  *
  * 环境变量：
+ *   ROTOM_PROVIDER      启动时使用的 Provider：ollama / deepseek，默认 ollama
  *   OLLAMA_BASE_URL    默认 http://127.0.0.1:11434
  *   OLLAMA_MODEL       不填时优先选择 qwen3.5 9b，否则选择第一个支持 completion 的非 embedding 模型
+ *   DEEPSEEK_API_KEY   直接指定 DeepSeek API key（优先于文件）
+ *   DEEPSEEK_API_KEY_FILE 默认 ./ds-apikey.txt
+ *   DEEPSEEK_BASE_URL  默认 https://api.deepseek.com
+ *   DEEPSEEK_MODEL     默认 deepseek-flash
  *   ROTOM_MCP_URL      默认 http://127.0.0.1:5000/mcp
  *   ROTOM_MCP_ID       MCP 工具名前缀，默认 mcp
  *   ROTOM_MCP_DISABLE  设为 1 时不注册 MCP Provider
  *
  * 命令：
  *   /exit                                退出
- *   /model <model-name>                  切换模型
- *   /list_models                         列出所有可用模型及其能力
+ *   /provider [providerId]               查看/切换 LLM Provider（ollama / deepseek）
+ *   /model <model-name>                  切换当前 Provider 的模型
+ *   /list_models                         列出当前 Provider 的可用模型及能力
  *   /tools                               列出当前可用的工具（含 MCP）
  *   /permission [readonly|approval|full] 查看/切换会话权限等级
  *   /upload <image-path>                 追加一个图片附件（jpg/jpeg/png/webp/gif）
@@ -57,6 +68,21 @@ const MCP_ID = process.env.ROTOM_MCP_ID ?? "mcp";
 const MCP_DISABLED = process.env.ROTOM_MCP_DISABLE === "1";
 const FILES_DIR = process.env.ROTOM_FILES_DIR ?? "./.rotom-files";
 const SUPPORTED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif"]);
+
+const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL ?? DEEPSEEK_DEFAULT_BASE_URL;
+const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL ?? "deepseek-flash";
+const DEEPSEEK_API_KEY_FILE = process.env.DEEPSEEK_API_KEY_FILE ?? "./ds-apikey.txt";
+
+const PROVIDER_IDS = ["ollama", "deepseek"] as const;
+type ProviderId = (typeof PROVIDER_IDS)[number];
+
+type ProviderRuntime = {
+    id: ProviderId;
+    label: string;
+    endpoint: string;
+    llm: LLMProvider;
+    model: string;
+};
 
 type ApprovalEvent = Extract<
     SessionEvent,
@@ -128,17 +154,131 @@ async function resolveInitialModel(provider: OllamaLLMProvider): Promise<string>
     return (preferred ?? candidates[0]).name;
 }
 
+function normalizeProviderId(value: string): ProviderId | null {
+    switch (value.trim().toLowerCase()) {
+        case "ollama":
+            return "ollama";
+        case "deepseek":
+        case "ds":
+            return "deepseek";
+        default:
+            return null;
+    }
+}
+
+function providerLabel(id: ProviderId): string {
+    return id === "ollama" ? "Ollama" : "DeepSeek";
+}
+
+async function readDeepSeekApiKey(): Promise<string> {
+    const configured = process.env.DEEPSEEK_API_KEY?.trim();
+    if (configured !== undefined && configured.length > 0) return configured;
+
+    const keyPath = resolve(process.cwd(), sanitizePathInput(DEEPSEEK_API_KEY_FILE));
+    let raw: string;
+    try {
+        raw = await readFile(keyPath, "utf8");
+    } catch {
+        throw new Error(`DeepSeek API key file is not readable: ${keyPath}`);
+    }
+
+    let key = raw.replace(/^\uFEFF/, "").trim();
+    const assignment = /^DEEPSEEK_API_KEY\s*=\s*(.+)$/m.exec(key);
+    if (assignment !== null) key = assignment[1]?.trim() ?? "";
+    key = key.replace(/^["']|["']$/g, "").trim();
+
+    if (key.length === 0) {
+        throw new Error(`DeepSeek API key file is empty: ${keyPath}`);
+    }
+    return key;
+}
+
+async function createProvider(id: ProviderId): Promise<ProviderRuntime> {
+    switch (id) {
+        case "ollama": {
+            const llm = new OllamaLLMProvider(BASE_URL);
+            const model = await resolveInitialModel(llm);
+            return {
+                id,
+                label: providerLabel(id),
+                endpoint: BASE_URL,
+                llm,
+                model,
+            };
+        }
+
+        case "deepseek": {
+            const apiKey = await readDeepSeekApiKey();
+            const llm = new DeepSeekLLMProvider({
+                apiKey,
+                baseUrl: DEEPSEEK_BASE_URL,
+            });
+            return {
+                id,
+                label: providerLabel(id),
+                endpoint: DEEPSEEK_BASE_URL,
+                llm,
+                model: DEEPSEEK_MODEL,
+            };
+        }
+    }
+}
+
+/** Provider 实例缓存：切换回来时复用同一个 LLMProvider 与其 CloudFileManager 缓存 */
+const providerCache = new Map<ProviderId, Promise<ProviderRuntime>>();
+
+async function getProvider(id: ProviderId): Promise<ProviderRuntime> {
+    const cached = providerCache.get(id);
+    if (cached !== undefined) return await cached;
+
+    const pending = createProvider(id).catch((error: unknown) => {
+        providerCache.delete(id);
+        throw error;
+    });
+    providerCache.set(id, pending);
+    return await pending;
+}
+
+async function resolveStartupProvider(): Promise<ProviderRuntime> {
+    const requestedRaw = process.env.ROTOM_PROVIDER ?? "ollama";
+    const requested = normalizeProviderId(requestedRaw);
+    if (requested === null) {
+        throw new Error(`Unknown provider "${requestedRaw}"; expected one of: ${PROVIDER_IDS.join(", ")}`);
+    }
+
+    const order: ProviderId[] = [
+        requested,
+        ...PROVIDER_IDS.filter((id) => id !== requested),
+    ];
+    let lastError: unknown;
+
+    for (const id of order) {
+        try {
+            const runtime = await getProvider(id);
+            if (runtime.id !== requested) {
+                console.log(`[provider] "${requested}" unavailable, fallback to "${runtime.id}"`);
+            }
+            return runtime;
+        } catch (error) {
+            lastError = error;
+            console.error(`[provider:${id}] ${errorMessage(error)}`);
+        }
+    }
+
+    throw lastError ?? new Error("No LLM provider is available");
+}
+
 async function main(): Promise<void> {
-    const provider = new OllamaLLMProvider(BASE_URL);
-    const model = await resolveInitialModel(provider);
+    let currentProviderRuntime = await resolveStartupProvider();
+    let currentModel = currentProviderRuntime.model;
 
     const history = new SessionHistory();
     const runtimeOptions: SessionRuntimeOptions = {
-        model,
+        model: currentModel,
         think: false,
     };
     const fileHost = new LocalFileHost(resolve(process.cwd(), FILES_DIR));
-    const session = new Session(provider, history, runtimeOptions, fileHost);
+    const session = new Session(currentProviderRuntime.llm, history, runtimeOptions, fileHost);
 
     const registry = new ToolRegistry({
         onProviderError: (providerId, error) => {
@@ -158,7 +298,6 @@ async function main(): Promise<void> {
     const workspace = process.cwd();
 
     let permission: SessionPermission = DEFAULT_SESSION_PERMISSION;
-    let currentModel = model;
     let outputStarted = false;
     let thinkingStarted = false;
     let pendingAttachments: string[] = [];
@@ -340,14 +479,15 @@ async function main(): Promise<void> {
         rl.close();
     });
 
-    console.log("Rotom Ollama console");
-    console.log(`baseUrl:    ${BASE_URL}`);
+    console.log("Rotom console");
+    console.log(`provider:   ${currentProviderRuntime.id} (${currentProviderRuntime.label})`);
+    console.log(`endpoint:   ${currentProviderRuntime.endpoint}`);
     console.log(`model:      ${currentModel}`);
     console.log(`permission: ${permission}`);
     console.log(`workspace:  ${workspace}`);
     console.log(`files:      ${fileHost.rootDir}`);
     console.log(`mcp:        ${MCP_DISABLED ? "disabled" : MCP_URL}`);
-    console.log("commands:   /exit, /model <name>, /list_models, /tools, /permission [readonly|approval|full]");
+    console.log("commands:   /exit, /provider [id], /model <name>, /list_models, /tools, /permission [readonly|approval|full]");
     console.log("            /upload <image-path>, /save_session [path], /restore_session [path]");
     console.log("note:       /restore_session 会丢弃当前会话数据");
     console.log("");
@@ -372,6 +512,49 @@ async function main(): Promise<void> {
                     break;
                 }
 
+                if (command === "provider") {
+                    const requestedRaw = args[0]?.trim() ?? "";
+                    if (requestedRaw.length === 0) {
+                        console.log(`provider: ${currentProviderRuntime.id} (${currentProviderRuntime.label})`);
+                        for (const id of PROVIDER_IDS) {
+                            const marks: string[] = [];
+                            if (id === currentProviderRuntime.id) marks.push("current");
+                            if (providerCache.has(id)) marks.push("initialized");
+                            const suffix = marks.length > 0 ? ` [${marks.join(", ")}]` : "";
+                            console.log(`  - ${id} (${providerLabel(id)})${suffix}`);
+                        }
+                        console.log("usage: /provider <ollama|deepseek>");
+                        continue;
+                    }
+
+                    const requested = normalizeProviderId(requestedRaw);
+                    if (requested === null) {
+                        console.log(`usage: /provider <ollama|deepseek> (current: ${currentProviderRuntime.id})`);
+                        continue;
+                    }
+                    if (session.isBusy) {
+                        console.log("[provider] cannot change while running");
+                        continue;
+                    }
+                    if (requested === currentProviderRuntime.id) {
+                        console.log(`provider already: ${currentProviderRuntime.id} (${currentModel})`);
+                        continue;
+                    }
+
+                    try {
+                        const next = await getProvider(requested);
+                        session.setLLM(next.llm);
+                        session.switchModel(next.model);
+                        currentProviderRuntime = next;
+                        currentModel = next.model;
+                        console.log(`provider switched to: ${next.id} (${next.label})`);
+                        console.log(`model: ${currentModel}`);
+                    } catch (error) {
+                        console.error(`[provider] ${errorMessage(error)}`);
+                    }
+                    continue;
+                }
+
                 if (command === "model") {
                     const modelName = args.join(" ").trim();
                     if (modelName.length === 0) {
@@ -380,6 +563,7 @@ async function main(): Promise<void> {
                         try {
                             session.switchModel(modelName);
                             currentModel = modelName;
+                            currentProviderRuntime.model = modelName;
                             console.log(`model switched to: ${currentModel}`);
                         } catch (error) {
                             console.error(`[model] ${errorMessage(error)}`);
@@ -389,12 +573,18 @@ async function main(): Promise<void> {
                 }
 
                 if (command === "list_models" || command === "models") {
+                    const modelProvider = currentProviderRuntime.llm.modelProvider;
+                    if (modelProvider === null) {
+                        console.log("[list_models] current provider has no model provider");
+                        continue;
+                    }
+
                     try {
-                        const models = await provider.modelProvider.initModels();
+                        const models = await modelProvider.initModels();
                         console.log(`available models (${models.length}):`);
                         for (const [index, item] of models.entries()) {
                             const marks: string[] = [];
-                            if (item.name === currentModel) marks.push("current");
+                            if (item.id === currentModel || item.name === currentModel) marks.push("current");
                             if (item.supportToolCall) marks.push("tools");
                             if (item.supportThink) marks.push("thinking");
                             if (item.isVisionModel) marks.push("vision");
@@ -464,15 +654,18 @@ async function main(): Promise<void> {
                     }
 
                     try {
-                        try {
-                            const models = provider.modelProvider.availableModels
-                                ?? await provider.modelProvider.initModels();
-                            const modelInfo = models.find(item => item.id === currentModel || item.name === currentModel);
-                            if (modelInfo !== undefined && !modelInfo.isVisionModel) {
-                                console.log(`[upload] note: model "${currentModel}" is not marked as vision; switch model before sending`);
+                        const modelProvider = currentProviderRuntime.llm.modelProvider;
+                        if (modelProvider !== null) {
+                            try {
+                                const models = modelProvider.availableModels
+                                    ?? await modelProvider.initModels();
+                                const modelInfo = models.find(item => item.id === currentModel || item.name === currentModel);
+                                if (modelInfo !== undefined && !modelInfo.isVisionModel) {
+                                    console.log(`[upload] note: model "${currentModel}" is not marked as vision; switch model before sending`);
+                                }
+                            } catch (error) {
+                                console.log(`[upload] model capability check skipped: ${errorMessage(error)}`);
                             }
-                        } catch (error) {
-                            console.log(`[upload] model capability check skipped: ${errorMessage(error)}`);
                         }
 
                         const bytes = new Uint8Array(await readFile(target));
