@@ -5,14 +5,15 @@ import { stdin as input, stdout as output } from "node:process";
 
 import { sanitizePathInput } from "./src/base";
 import { detectImageMimeType } from "./src/file";
-import { LocalFileHost } from "./src/file/local";
+import { LocalFileHost, readLocalSourcePath } from "./src/file/local";
 import {
     DEEPSEEK_DEFAULT_BASE_URL,
     DeepSeekLLMProvider,
     OllamaLLMProvider,
 } from "./src/platform/index";
-import { createMcpProvider, LocalToolProvider } from "./src/tool/index";
+import { createMcpProvider, LocalToolProvider } from "./src/client";
 import {
+    AttachmentFileManager,
     DEFAULT_SESSION_PERMISSION,
     HOST_TOOL_DEFINITIONS,
     RunStatus,
@@ -32,22 +33,22 @@ import type {
 } from "./src/session/type";
 
 /**
- * Rotom 控制台客户端。
+ * Wireclaw 控制台客户端。
  *
  * 用法：
  *   npx tsx client.ts
  *
  * 环境变量：
- *   ROTOM_PROVIDER      启动时使用的 Provider：ollama / deepseek，默认 ollama
+ *   WIRECLAW_PROVIDER      启动时使用的 Provider：ollama / deepseek，默认 ollama
  *   OLLAMA_BASE_URL    默认 http://127.0.0.1:11434
  *   OLLAMA_MODEL       不填时优先选择 qwen3.5 9b，否则选择第一个支持 completion 的非 embedding 模型
  *   DEEPSEEK_API_KEY   直接指定 DeepSeek API key（优先于文件）
  *   DEEPSEEK_API_KEY_FILE 默认 ./ds-apikey.txt
  *   DEEPSEEK_BASE_URL  默认 https://api.deepseek.com
  *   DEEPSEEK_MODEL     默认 deepseek-flash
- *   ROTOM_MCP_URL      默认 http://127.0.0.1:5000/mcp
- *   ROTOM_MCP_ID       MCP 工具名前缀，默认 mcp
- *   ROTOM_MCP_DISABLE  设为 1 时不注册 MCP Provider
+ *   WIRECLAW_MCP_URL      默认 http://127.0.0.1:5000/mcp
+ *   WIRECLAW_MCP_ID       MCP 工具名前缀，默认 mcp
+ *   WIRECLAW_MCP_DISABLE  设为 1 时不注册 MCP Provider
  *
  * 命令：
  *   /exit                                退出
@@ -57,16 +58,16 @@ import type {
  *   /tools                               列出当前可用的工具（含 MCP）
  *   /permission [readonly|approval|full] 查看/切换会话权限等级
  *   /upload <image-path>                 追加一个图片附件（jpg/jpeg/png/webp/gif）
- *   /save_session [path]                 保存当前会话数据（默认 ./rotom-session.json）
+ *   /save_session [path]                 保存当前会话数据（默认 ./wireclaw-session.json）
  *   /restore_session [path]              读取会话数据并覆盖当前会话（会丢弃当前数据）
  */
 
 const BASE_URL = process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434";
-const DEFAULT_SESSION_PATH = "./rotom-session.json";
-const MCP_URL = process.env.ROTOM_MCP_URL ?? "http://127.0.0.1:5000/mcp";
-const MCP_ID = process.env.ROTOM_MCP_ID ?? "mcp";
-const MCP_DISABLED = process.env.ROTOM_MCP_DISABLE === "1";
-const FILES_DIR = process.env.ROTOM_FILES_DIR ?? "./.rotom-files";
+const DEFAULT_SESSION_PATH = "./wireclaw-session.json";
+const MCP_URL = process.env.WIRECLAW_MCP_URL ?? "http://127.0.0.1:5000/mcp";
+const MCP_ID = process.env.WIRECLAW_MCP_ID ?? "mcp";
+const MCP_DISABLED = process.env.WIRECLAW_MCP_DISABLE === "1";
+const FILES_DIR = process.env.WIRECLAW_FILES_DIR ?? "./.wireclaw-files";
 const SUPPORTED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif"]);
 
 const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL ?? DEEPSEEK_DEFAULT_BASE_URL;
@@ -240,7 +241,7 @@ async function getProvider(id: ProviderId): Promise<ProviderRuntime> {
 }
 
 async function resolveStartupProvider(): Promise<ProviderRuntime> {
-    const requestedRaw = process.env.ROTOM_PROVIDER ?? "ollama";
+    const requestedRaw = process.env.WIRECLAW_PROVIDER ?? "ollama";
     const requested = normalizeProviderId(requestedRaw);
     if (requested === null) {
         throw new Error(`Unknown provider "${requestedRaw}"; expected one of: ${PROVIDER_IDS.join(", ")}`);
@@ -278,7 +279,10 @@ async function main(): Promise<void> {
         think: false,
     };
     const fileHost = new LocalFileHost(resolve(process.cwd(), FILES_DIR));
-    const session = new Session(currentProviderRuntime.llm, history, runtimeOptions, fileHost);
+    const attachmentManager = new AttachmentFileManager(fileHost, {
+        readSourcePath: readLocalSourcePath,
+    });
+    const session = new Session(currentProviderRuntime.llm, history, runtimeOptions, attachmentManager);
 
     const registry = new ToolRegistry({
         onProviderError: (providerId, error) => {
@@ -479,7 +483,7 @@ async function main(): Promise<void> {
         rl.close();
     });
 
-    console.log("Rotom console");
+    console.log("Wireclaw console");
     console.log(`provider:   ${currentProviderRuntime.id} (${currentProviderRuntime.label})`);
     console.log(`endpoint:   ${currentProviderRuntime.endpoint}`);
     console.log(`model:      ${currentModel}`);
@@ -675,7 +679,12 @@ async function main(): Promise<void> {
                             continue;
                         }
 
-                        const file = await fileHost.put(basename(target), bytes, mimeType);
+                        const file = await attachmentManager.put(
+                            basename(target),
+                            bytes,
+                            mimeType,
+                            [target],
+                        );
                         if (!pendingAttachments.includes(file.contentHash)) {
                             pendingAttachments.push(file.contentHash);
                         }
@@ -699,6 +708,7 @@ async function main(): Promise<void> {
                     }
 
                     try {
+                        await fileHost.flush();
                         const data = SessionSerializer.serialize(history);
                         await mkdir(dirname(target), { recursive: true });
                         await writeFile(target, `${JSON.stringify(data, null, 2)}\n`, "utf8");
@@ -768,6 +778,7 @@ async function main(): Promise<void> {
         }
     } finally {
         rl.close();
+        await attachmentManager.close();
         await registry.closeAll();
     }
 }

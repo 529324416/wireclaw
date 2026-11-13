@@ -1,6 +1,6 @@
 import { uniqueId } from "../base";
 import { SessionError, SessionErrorType, ToolError, ToolErrorType } from "./error";
-import type { IFileHost } from "./file";
+import type { AttachmentFileManager } from "./attachment-manager";
 import { AssistantMessage, ToolMessage, tool, user } from "./message";
 import type { Message } from "./message";
 import type { LLMProvider } from "./protocol";
@@ -815,7 +815,7 @@ export class Session{
     private _runtimeOptions: SessionRuntimeOptions;
     private _currentSession?: SessionHistory;
     private _llm?: LLMProvider;
-    private _fileHost?: IFileHost;
+    private _attachmentManager?: AttachmentFileManager;
 
     /** 当前会话的运行期附件映射；只在内存中存在，不进入 SessionData */
     private _attachmentRefs: AttachmentWireMap = new Map();
@@ -839,20 +839,23 @@ export class Session{
         llm?: LLMProvider,
         history?: SessionHistory,
         options: SessionRuntimeOptions = {},
-        fileHost?: IFileHost,
+        attachmentManager?: AttachmentFileManager,
     ){
         this._llm = llm;
         this._currentSession = history;
         this._runtimeOptions = { ...options };
-        this._fileHost = fileHost;
+        this._attachmentManager = attachmentManager;
         this._runEngine = new RunEngine();
     }
 
     /** 当前会话数据 */
     get history(): SessionHistory | undefined{ return this._currentSession; }
 
-    /** 当前文件宿主；undefined 表示不支持附件 */
-    get fileHost(): IFileHost | undefined{ return this._fileHost; }
+    /** 当前运行时选项；返回副本，避免外部修改内部状态 */
+    get runtimeOptions(): SessionRuntimeOptions{ return { ...this._runtimeOptions }; }
+
+    /** 当前附件管理器；undefined 表示不支持附件 */
+    get attachmentManager(): AttachmentFileManager | undefined{ return this._attachmentManager; }
 
     /** 当前会话的附件映射；返回副本，避免外部修改内部状态 */
     get attachmentRefs(): AttachmentWireMap{ return new Map(this._attachmentRefs); }
@@ -919,12 +922,12 @@ export class Session{
         this._attachmentRefs = new Map();
     }
 
-    /** 设置文件宿主；运行中不允许切换
-     * @note 宿主应与当前历史中的附件指纹兼容；切换会话时由调用方保证
+    /** 设置附件管理器；运行中不允许切换
+     * @note 管理器应与当前历史中的附件指纹兼容；切换会话时由调用方保证
      */
-    setFileHost(fileHost: IFileHost | undefined): void{
-        this._assertIdle("switch file host");
-        this._fileHost = fileHost;
+    setAttachmentManager(attachmentManager: AttachmentFileManager | undefined): void{
+        this._assertIdle("switch attachment manager");
+        this._attachmentManager = attachmentManager;
         this._attachmentRefs = new Map();
     }
 
@@ -1059,6 +1062,7 @@ export class Session{
 
         const history = this._currentSession;
         const llm = this._llm;
+        await this._ensureRuntimeModel(llm);
         const inputMessage = user(input);
 
         const run = new Run(history.id);
@@ -1157,11 +1161,11 @@ export class Session{
             return undefined;
         }
 
-        const fileHost = this._fileHost;
-        if (fileHost === undefined){
+        const attachmentManager = this._attachmentManager;
+        if (attachmentManager === undefined){
             throw new SessionError(
                 SessionErrorType.InvalidRequest,
-                "Attachment content requires an IFileHost",
+                "Attachment content requires an AttachmentFileManager",
             );
         }
 
@@ -1184,11 +1188,12 @@ export class Session{
                 );
             }
 
-            const file = await fileHost.get(contentHash);
+            const file = await attachmentManager.get(contentHash);
             if (file === undefined){
                 throw new SessionError(
                     SessionErrorType.InvalidData,
-                    `Attachment file not found: ${contentHash}`,
+                    `Attachment file is missing or corrupted: ${contentHash}; `
+                        + "the session data cannot be fully restored",
                 );
             }
 
@@ -1252,6 +1257,19 @@ export class Session{
         const pending = this._approval;
         this._approval = null;
         return pending;
+    }
+
+    /** 未显式指定模型时，由 Provider 选择默认模型
+     * @note 只补齐 model；think / thinkingLv 未设置时保持 Provider 默认
+     */
+    private async _ensureRuntimeModel(llm: LLMProvider): Promise<void>{
+        const current = this._runtimeOptions.model;
+        if (typeof current === "string" && current.length > 0) return;
+
+        const model = await llm.resolveDefaultModel();
+        if (model !== undefined && model.length > 0){
+            this._runtimeOptions = { ...this._runtimeOptions, model };
+        }
     }
 
     private _assertIdle(action: string): void{

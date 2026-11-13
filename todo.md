@@ -1,10 +1,10 @@
-# Rotom TODO
+# Wireclaw TODO
 
 ## 工具系统
 
 ### 先回答：MCP 的能力边界
 
-Rotom 目前实现的是 **MCP Client / Host**，不是 MCP Server；只覆盖 `tools` 子集。
+Wireclaw 目前实现的是 **MCP Client / Host**，不是 MCP Server；只覆盖 `tools` 子集。
 
 MCP 并不只是「跨进程提供工具」：
 
@@ -29,6 +29,7 @@ MCP 并不只是「跨进程提供工具」：
 - [x] HTTP 会话：`DELETE` 关闭
 - [x] HTTP 断线恢复（后台 GET SSE + `Last-Event-ID` 续传）
 - [x] stdio 实机测试（Python 子进程 + NDJSON）
+- [x] 本地工具与 stdio 传输移出核心，改由参考客户端 `src/client` 提供
 - [x] 服务端心跳 / 健康检查（默认 30s `ping`，连续失败标记不健康）
 
 ### 契约与上下文
@@ -50,15 +51,18 @@ MCP 并不只是「跨进程提供工具」：
 - [x] 用户图片附件（Ollama inline / DeepSeek Files API）
 - [ ] MCP 多模态结果接入附件系统
 - [ ] `tasks` / 长任务
-- [ ] 协议版本更新（新修订发布后评估）
+- [x] 协议版本窗口：`2025-11-25` / `2025-06-18`，移除 `2024-11-05` 与旧版 HTTP+SSE
+- [ ] `2026-07-28` 无状态客户端评估（移除 initialize / session）
 
 ### 工程化
 
+- [x] `createNewSession` 组装入口：新历史、可选附件管理器、可选运行时选项、默认模型解析
+- [x] 构建与分发：tsup 输出 browser/node bundle，tsc 输出声明，`exports` / `files` / `prepublishOnly`
 - [ ] 多 Server 配置加载
 - [ ] 工具 allowlist / 按 Server 的审批、并发、超时覆盖
 - [ ] 鉴权（OAuth / 动态注册）—— 暂缓
 - [ ] 指标、审计、限流 —— 暂缓
-- [ ] Rotom 作为 MCP Server 的多客户端并发支持（远期）
+- [ ] Wireclaw 作为 MCP Server 的多客户端并发支持（远期）
 
 ## 附件系统
 
@@ -66,6 +70,10 @@ MCP 并不只是「跨进程提供工具」：
 
 - [x] 内容寻址（SHA-256 contentHash）
 - [x] `AttachmentFile` / `IFileHost` / `LocalFileHost`
+- [x] 附件策略与存储分离：`AttachmentFileManager` + 原始 `IFileHost`
+- [x] OPFS 宿主（浏览器 / Electron 渲染进程）与内存宿主
+- [x] IndexedDB 宿主（浏览器存储不可用时的可选宿主）
+- [x] `AttachmentFile` 原始路径组、路径合并与宿主字节丢失后的恢复
 - [x] `AttachmentRef` 只保存 contentHash，严格序列化
 - [x] `CloudFileManager` / `RemoteFileRef` / `AttachmentWireMap`
 - [x] Session 发送前解析附件并注入 `ChatOptions`
@@ -77,8 +85,9 @@ MCP 并不只是「跨进程提供工具」：
 
 ### 待办
 
-- [ ] 浏览器/Electron 版 `IFileHost`（IndexedDB / OPFS / 原生文件系统）
-- [ ] 包入口拆分与条件导出，隔离 `node:fs` / `node:child_process` 等 Node-only 模块
+- [x] 浏览器/Electron 版 `IFileHost`（OPFS / IndexedDB / 原生文件系统；Electron 主进程使用 `LocalFileHost`）
+- [ ] Electron 渲染进程的 IPC 桥接宿主（Session 不在主进程时）
+- [x] 包入口拆分：`wireclaw` / `wireclaw/browser` 浏览器安全，`wireclaw/node` 追加 `LocalFileHost`，`wireclaw/client` 提供 Node-only 参考实现
 - [ ] 统一 `AttachmentFileError` 错误类型（本地缺失、远端缺失、上传失败、网络、类型、超限）
 - [ ] 文件生命周期：引用计数、Pin、压缩/归档/删除、孤儿清理、存储配额
 - [ ] 共享 Provider 下的上传取消语义与等待者隔离
@@ -102,7 +111,7 @@ MCP 并不只是「跨进程提供工具」：
 - `adviceTimeout` 值得加入：默认 30s，允许工具自定义，最大 3600s。
 - 进度反馈可以做成类似探针的 API（按 `callId` 查询），但不是重点。
 - 鉴权、指标/审计暂时不加。
-- 若 Rotom 未来作为 MCP Server，需要处理多客户端并发。
+- 若 Wireclaw 未来作为 MCP Server，需要处理多客户端并发。
 - 多模态内容等附件系统完成后再补。
 - 封闭开发阶段不保留向后兼容代码；序列化只接受当前 schema。
 - 附件历史只保存 contentHash；Provider 切换后按新 Provider 重新解析。

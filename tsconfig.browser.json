@@ -7,10 +7,21 @@
     "types": []
   },
   "include": [
+    "src/index.ts",
+    "src/browser.ts",
     "src/base/**/*.ts",
     "src/session/**/*.ts",
     "src/file/**/*.ts",
-    "src/platform/**/*.ts"
+    "src/platform/**/*.ts",
+    "src/tool/**/*.ts"
   ],
-  "exclude": ["node_modules", "dist", "test", "test.ts", "src/file/local.ts"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "test",
+    "test.ts",
+    "src/file/local.ts",
+    "src/node.ts",
+    "src/client/**"
+  ]
 }

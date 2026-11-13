@@ -1,4 +1,4 @@
-"""Rotom MCP 测试服务器（Python + Flask）。
+"""Wireclaw MCP 测试服务器（Python + Flask）。
 
 运行：
     pip install flask
@@ -14,7 +14,7 @@
     echo             只读，回显文本
     add              只读，数字相加
     python_env       只读，返回 Python 版本 / 平台 / PID
-    write_temp_file  破坏性，写入系统临时目录（Rotom 侧会触发审批）
+    write_temp_file  破坏性，写入系统临时目录（Wireclaw 侧会触发审批）
     divide           只读，除零时返回 isError
 """
 
@@ -29,10 +29,10 @@ from typing import Any
 from flask import Flask, jsonify, request
 
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_NAME = "rotom-python-mcp"
+SERVER_NAME = "wireclaw-python-mcp"
 SERVER_VERSION = "0.1.0"
 
-TEMP_DIR = (Path(tempfile.gettempdir()) / "rotom-mcp-example").resolve()
+TEMP_DIR = (Path(tempfile.gettempdir()) / "wireclaw-mcp-example").resolve()
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__)
@@ -209,7 +209,7 @@ def mcp_endpoint() -> Any:
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-            "instructions": "Rotom 测试服务器：echo / add / python_env / write_temp_file / divide",
+            "instructions": "Wireclaw 测试服务器：echo / add / python_env / write_temp_file / divide",
         }))
 
     if method == "ping":

@@ -31,14 +31,20 @@ export type JsonRpcResponse = {
 
 export type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcResponse;
 
-/** 默认协商的 MCP 协议版本 */
-export const MCP_PROTOCOL_VERSION = "2025-06-18";
+/** 默认协商的 MCP 协议版本
+ * @note 只支持官方规范修订；不实现已废弃的旧传输（HTTP+SSE）
+ */
+export const MCP_PROTOCOL_VERSION = "2025-11-25";
 
-/** 客户端支持的协议版本（按优先级） */
+/** 客户端支持的官方协议版本（按优先级）
+ * @note 支持窗口为当前修订 + 上一修订。
+ *       2025-11-25 是增量修订，保留 initialize 握手与 Streamable HTTP；
+ *       2024-11-05 / 旧版 HTTP+SSE 已移除；
+ *       2026-07-28 为无状态大版本（移除 initialize / session），需要独立客户端实现。
+ */
 export const MCP_SUPPORTED_VERSIONS: readonly string[] = [
+    "2025-11-25",
     "2025-06-18",
-    "2025-03-26",
-    "2024-11-05",
 ];
 
 /** 协议错误码 */

@@ -6,7 +6,6 @@
 export * from "./type";
 export * from "./error";
 export * from "./transport";
-export * from "./stdio";
 export * from "./http";
 export * from "./client";
 export * from "./naming";

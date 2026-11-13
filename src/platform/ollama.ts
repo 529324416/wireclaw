@@ -1,6 +1,6 @@
 import { toBase64, uniqueId } from "../base";
 import { detectImageMimeType } from "../file";
-import type { AttachmentFile } from "../file";
+import type { AttachmentFile } from "../session/attachment";
 import { SessionError, SessionErrorType } from "../session/error";
 import { AssistantMessage, ToolMessage } from "../session";
 import type { Message } from "../session";
@@ -61,7 +61,7 @@ type OllamaContent = {
     images: string[];
 };
 
-/** 把 Rotom 内容转换为 Ollama 的文本 + images(base64)
+/** 把 Wireclaw 内容转换为 Ollama 的文本 + images(base64)
  * @note Ollama 没有远端文件 ID，图片必须以 base64 放在消息的 images 字段中
  */
 function contentToOllama(
@@ -180,12 +180,12 @@ function parseToolCalls(value: unknown): ToolCall[]{
     });
 }
 
-/** Ollama 协议适配器：Rotom Message <-> Ollama chat message
+/** Ollama 协议适配器：Wireclaw Message <-> Ollama chat message
  * @note 图片附件按 Ollama 协议编码为 base64，并放入 user 消息的 images 数组
  */
 export class OllamaProtocolAdapter extends ProtocolAdapter{
 
-    /** 将 Rotom Message 转成 Ollama chat message
+    /** 将 Wireclaw Message 转成 Ollama chat message
      * @note Ollama 的图片协议是 base64 inline；其他平台可能是 file_id / URL / data URL
      */
     toPayload(msg: Message, attachmentRefs?: AttachmentWireMap): OllamaMessage{
@@ -526,6 +526,18 @@ export class OllamaLLMProvider extends LLMProvider{
     get title(): string{ return "Ollama"; }
 
     override get supportsTools(): boolean{ return true; }
+
+    override async resolveDefaultModel(): Promise<string | undefined>{
+        const models = this._modelProvider.availableModels ?? await this._modelProvider.initModels();
+        const candidates = models.filter(
+            (model) => model.supportCompletion && !model.isEmbeddingModel,
+        );
+
+        const preferred = candidates.find((model) => model.name === "qwen3.5:9b")
+            ?? candidates.find((model) => /qwen3\.5.*9b/i.test(model.name));
+
+        return (preferred ?? candidates[0])?.name;
+    }
 
     async send(
         messages: readonly Message[],

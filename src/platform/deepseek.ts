@@ -1,6 +1,6 @@
 import { InvalidParameterError, toBase64, uniqueId } from "../base";
 import { detectImageMimeType, normalizeImageMimeType } from "../file";
-import type { AttachmentFile } from "../file";
+import type { AttachmentFile } from "../session/attachment";
 import { SessionError, SessionErrorType } from "../session/error";
 import { AssistantMessage, ToolMessage } from "../session";
 import type { Message } from "../session";
@@ -73,10 +73,10 @@ type DeepSeekMessage = {
     tool_call_id?: string;
 };
 
-/** 将 DeepSeek 的 OpenAI 兼容响应/流转换为 Rotom 消息与片段 */
+/** 将 DeepSeek 的 OpenAI 兼容响应/流转换为 Wireclaw 消息与片段 */
 export class DeepSeekProtocolAdapter extends ProtocolAdapter {
 
-    /** 将 Rotom Message 转成 DeepSeek OpenAI 兼容消息
+    /** 将 Wireclaw Message 转成 DeepSeek OpenAI 兼容消息
      * @note 图片/文件编码属于 DeepSeek 平台协议：file_id 使用 file 块，
      *       内联图片使用 image_url + data URL。
      */
@@ -583,6 +583,17 @@ export class DeepSeekLLMProvider extends LLMProvider {
     get title(): string { return "DeepSeek"; }
 
     override get supportsTools(): boolean { return true; }
+
+    override async resolveDefaultModel(): Promise<string | undefined> {
+        const models = this._modelProvider.availableModels ?? await this._modelProvider.initModels();
+        const preferred = models.find(
+            (model) => model.id === "deepseek-flash" || model.name === "deepseek-flash",
+        ) ?? models.find(
+            (model) => model.supportCompletion && !model.isEmbeddingModel,
+        );
+
+        return preferred === undefined ? undefined : (preferred.id || preferred.name);
+    }
 
     async send(
         messages: readonly Message[],

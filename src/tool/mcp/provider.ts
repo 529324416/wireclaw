@@ -2,7 +2,6 @@ import { isToolError, ToolError, ToolErrorType } from "../../session/error";
 import type { ToolCall, ToolCallResult, ToolDefinition, ToolParamSchema } from "../../session/type";
 import type { ToolCallOptions, ToolProvider } from "../../session/tool";
 import { McpClient } from "./client";
-import { createTransport } from "./config";
 import {
     McpAbortError,
     McpProtocolError,
@@ -17,7 +16,7 @@ import type { McpCallToolResult, McpProgressNotification, McpTool, McpToolAnnota
 import type { McpTransport } from "./transport";
 
 /**
- * 把外部 MCP Server 映射成 Rotom 的 ToolProvider。
+ * 把外部 MCP Server 映射成 Wireclaw 的 ToolProvider。
  *
  * - 工具名：MCP 原始名 -> 模型安全 id（见 naming.ts）
  * - 注解：readOnlyHint / destructiveHint 等直接透传
@@ -48,7 +47,7 @@ export class McpToolProvider implements ToolProvider {
         this._concurrencySafe = config.concurrencySafe ?? false;
 
         this._client = new McpClient(transport, {
-            clientInfo: { name: "rotom", version: "1.0.0" },
+            clientInfo: { name: "wireclaw", version: "1.0.0" },
             protocolVersion: config.protocolVersion,
             timeoutMs: config.requestTimeoutMs,
             heartbeatIntervalMs: config.heartbeatIntervalMs ?? 30_000,
@@ -194,11 +193,6 @@ export class McpToolProvider implements ToolProvider {
                 return annotations?.readOnlyHint !== true;
         }
     }
-}
-
-/** 从配置创建 McpToolProvider */
-export function createMcpProvider(config: McpServerConfig): McpToolProvider {
-    return new McpToolProvider(config, createTransport(config.transport));
 }
 
 function normalizeInputSchema(schema: Record<string, unknown> | undefined): ToolParamSchema {

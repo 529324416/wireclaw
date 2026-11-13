@@ -375,7 +375,8 @@ export class McpHttpTransport implements McpTransport {
                 this._eventStreamWake = null;
                 resolve();
             }, ms);
-            timer.unref?.();
+            // Node 的定时器支持 unref；浏览器没有该能力
+            (timer as unknown as { unref?: () => void }).unref?.();
 
             this._eventStreamWake = () => {
                 clearTimeout(timer);

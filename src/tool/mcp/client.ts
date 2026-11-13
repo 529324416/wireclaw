@@ -97,7 +97,7 @@ export class McpClient {
 
     constructor(transport: McpTransport, options: McpClientOptions = {}) {
         this._transport = transport;
-        this._clientInfo = options.clientInfo ?? { name: "rotom", version: "1.0.0" };
+        this._clientInfo = options.clientInfo ?? { name: "wireclaw", version: "1.0.0" };
         this._preferredVersion = options.protocolVersion ?? MCP_PROTOCOL_VERSION;
         this._timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
         this._onNotification = options.onNotification;
@@ -517,7 +517,8 @@ export class McpClient {
         this._heartbeatTimer = setInterval(() => {
             void this._heartbeatTick();
         }, this._heartbeatIntervalMs);
-        this._heartbeatTimer.unref?.();
+        // Node 的定时器支持 unref；浏览器没有该能力
+        (this._heartbeatTimer as unknown as { unref?: () => void }).unref?.();
     }
 
     private _stopHeartbeat(): void {

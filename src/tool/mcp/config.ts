@@ -1,26 +1,3 @@
-import { McpHttpTransport } from "./http";
-import { McpStdioTransport } from "./stdio";
-import type { McpTransport } from "./transport";
-
-/** stdio 传输配置 */
-export type McpStdioTransportConfig = {
-    type: "stdio";
-    command: string;
-    args?: string[];
-    env?: Record<string, string>;
-    cwd?: string;
-    onStderr?: (chunk: string) => void;
-};
-
-/** Streamable HTTP 传输配置 */
-export type McpHttpTransportConfig = {
-    type: "http";
-    url: string;
-    headers?: Record<string, string>;
-};
-
-export type McpTransportConfig = McpStdioTransportConfig | McpHttpTransportConfig;
-
 /** MCP 工具审批策略
  * - auto：只读工具自动放行，其余需要审批
  * - always：全部需要审批
@@ -40,9 +17,6 @@ export type McpServerConfig = {
     /** 描述 */
     description?: string;
 
-    /** 传输配置 */
-    transport: McpTransportConfig;
-
     /** 审批策略，默认 auto */
     approval?: McpApprovalMode;
 
@@ -58,28 +32,3 @@ export type McpServerConfig = {
     /** 心跳间隔（毫秒），默认 30s；0 关闭 */
     heartbeatIntervalMs?: number;
 };
-
-/** 根据配置创建传输层 */
-export function createTransport(config: McpTransportConfig): McpTransport {
-    switch (config.type) {
-        case "stdio":
-            return new McpStdioTransport({
-                command: config.command,
-                args: config.args,
-                env: config.env,
-                cwd: config.cwd,
-                onStderr: config.onStderr,
-            });
-
-        case "http":
-            return new McpHttpTransport({
-                url: config.url,
-                headers: config.headers,
-            });
-
-        default: {
-            const exhaustive: never = config;
-            throw new Error(`Unsupported MCP transport: ${String(exhaustive)}`);
-        }
-    }
-}

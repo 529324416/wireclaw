@@ -1,0 +1,176 @@
+# Wireclaw
+
+[English](./README.md) | 简体中文
+
+Wireclaw 是一个可嵌入的 AI Harness 模块。
+
+它把「对话循环、工具调用、审批与权限、附件管理、会话序列化、多 Provider 适配」这些流程收敛成可组装的 `Session`；LLM、工具、附件存储等具体实现由宿主提供。
+
+> 详细架构、Provider/MCP/附件实现、构建与测试说明见 [architecture.md](./architecture.md)。
+
+## 状态
+
+- 当前版本：`0.1.1`（早期版本，API 仍可能调整）
+- 包格式：ESM
+- Node：`>=20.3.0`
+- 核心入口浏览器安全；Node-only 能力放在子路径
+- License：MIT，见 [LICENSE](./LICENSE)
+
+## 安装
+
+```bash
+npm install wireclaw
+```
+
+## 包入口
+
+| 入口 | 内容 |
+|---|---|
+| `wireclaw` | 浏览器安全核心：Session、附件管理器、Provider、MCP 核心 |
+| `wireclaw/browser` | 显式浏览器安全入口，与根入口一致 |
+| `wireclaw/node` | 追加 `LocalFileHost` / `readLocalSourcePath` |
+| `wireclaw/client` | Node-only 参考客户端：本地工具、MCP stdio、`createMcpProvider` |
+
+## 快速开始：Node + Ollama
+
+```ts
+import { createNewSession, OllamaLLMProvider } from "wireclaw";
+
+const session = createNewSession(new OllamaLLMProvider());
+
+const run = await session.run("你好，介绍一下你自己");
+console.log(run.status);
+```
+
+`createNewSession` 会创建一条空历史的新会话。没有显式传模型时，首次运行会向 Provider 询问默认模型（Ollama 优先 `qwen3.5:9b`）。
+
+DeepSeek：
+
+```ts
+import { DeepSeekLLMProvider, createNewSession } from "wireclaw";
+
+const llm = new DeepSeekLLMProvider({
+  apiKey: process.env.DEEPSEEK_API_KEY!,
+});
+
+const session = createNewSession(llm);
+await session.run("你好");
+```
+
+## 附件：Node 本地文件
+
+```ts
+import { readFile } from "node:fs/promises";
+
+import { AttachmentFileManager, OllamaLLMProvider, createNewSession } from "wireclaw";
+import { LocalFileHost, readLocalSourcePath } from "wireclaw/node";
+
+const path = "/absolute/path/photo.png";
+const bytes = new Uint8Array(await readFile(path));
+
+const host = new LocalFileHost("./.wireclaw-files");
+const attachmentManager = new AttachmentFileManager(host, {
+  readSourcePath: readLocalSourcePath,
+});
+
+const session = createNewSession(new OllamaLLMProvider(), attachmentManager);
+const file = await attachmentManager.put("photo.png", bytes, "image/png", [path]);
+
+await session.run([
+  { type: "text", text: "描述这张图片" },
+  { type: "attachment", attachment: { contentHash: file.contentHash } },
+]);
+```
+
+`sourcePaths` 会随附件元数据保存；宿主字节被删除时，管理器会尝试从原始路径恢复。
+
+## 浏览器 / Electron 渲染进程
+
+```ts
+import {
+  AttachmentFileManager,
+  createNewSession,
+  OllamaLLMProvider,
+  OpfsFileHost,
+} from "wireclaw/browser";
+
+const host = new OpfsFileHost();
+const attachmentManager = new AttachmentFileManager(host);
+const session = createNewSession(new OllamaLLMProvider(), attachmentManager);
+
+await session.run("你好");
+```
+
+- 浏览器里不要 import `wireclaw/node` 或 `wireclaw/client`，它们包含 `node:fs` / `node:child_process`；
+- 渲染进程直接请求 Ollama / DeepSeek 可能遇到 CORS，通常需要通过宿主代理或主进程转发；
+- Electron 主进程使用 `wireclaw/node`，渲染进程使用 `wireclaw/browser`。
+
+## 工具与 MCP
+
+核心包提供 MCP 客户端与 HTTP 传输：
+
+```ts
+import { McpHttpTransport, McpToolProvider, ToolRegistry } from "wireclaw";
+
+const registry = new ToolRegistry();
+registry.registerProvider(new McpToolProvider(
+  { id: "mcp" },
+  new McpHttpTransport({ url: "http://127.0.0.1:5000/mcp" }),
+));
+
+await session.run("查一下当前 Python 环境", { tools: registry });
+```
+
+Node 宿主还可以使用参考实现：
+
+```ts
+import { ToolRegistry } from "wireclaw";
+import { LocalToolProvider, createMcpProvider } from "wireclaw/client";
+
+const registry = new ToolRegistry();
+registry.registerProvider(new LocalToolProvider(process.cwd()));
+registry.registerProvider(createMcpProvider({
+  id: "mcp",
+  transport: { type: "http", url: "http://127.0.0.1:5000/mcp" },
+}));
+```
+
+三档权限：
+
+```ts
+await session.run("只读查询", {
+  tools: registry,
+  permission: "readonly",
+});
+```
+
+`readonly` / `approval` / `full` 的完整语义见 [architecture.md](./architecture.md)。
+
+## 开发
+
+```bash
+npm install
+npm run typecheck
+npm run build
+```
+
+构建产物在 `dist/`：
+
+```
+dist/
+  browser/index.js
+  node/node.js
+  node/client.js
+  types/
+```
+
+## 文档
+
+- [architecture.md](./architecture.md)：架构、Provider、MCP、附件系统、构建与测试
+- [LICENSE](./LICENSE)：MIT
+
+## License
+
+MIT © 2026 biscuit
+
+<!-- 维护提示：README 保持为简介 + 基础用法；实现细节请写入 architecture.md。 -->

@@ -13,5 +13,6 @@ export * from './protocol'
 export * from './tool'
 export * from './host-tool'
 
-// 文件相关
-export * from './file'
+// 附件相关
+export * from './attachment'
+export * from './attachment-manager'

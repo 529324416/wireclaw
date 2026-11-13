@@ -1,4 +1,4 @@
-import { RotomError } from "../base";
+import { WireclawError } from "../base";
 
 /** 会话错误类型 */
 export const SessionErrorType = {
@@ -18,7 +18,7 @@ export const SessionErrorType = {
 export type SessionErrorType = (typeof SessionErrorType)[keyof typeof SessionErrorType];
 
 /** 会话错误 */
-export class SessionError extends RotomError{
+export class SessionError extends WireclawError{
 
     /** 错误类型 */
     readonly type: SessionErrorType;
@@ -51,7 +51,7 @@ export type ToolErrorType = (typeof ToolErrorType)[keyof typeof ToolErrorType];
 
 
 /** 工具错误 */
-export class ToolError extends RotomError{
+export class ToolError extends WireclawError{
 
     /** 错误类型 */
     readonly type: ToolErrorType;

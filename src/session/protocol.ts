@@ -1,6 +1,6 @@
 /* Session模块协议定义 */
 
-import type { AttachmentFile } from "../file";
+import type { AttachmentFile } from "./attachment";
 import { handleSessionError } from "./error";
 import type { AssistantMessage, Message } from "./message";
 import type {
@@ -239,6 +239,21 @@ export abstract class LLMProvider{
 
     /** 该 Provider 是否具备附件处理能力；模型级能力由具体实现进一步约束 */
     get supportsAttachments(): boolean { return this.cloudFileManager !== null; }
+
+    /** 选择默认模型；返回 undefined 表示没有可选模型
+     * @note 默认实现选择第一个支持 completion 且非 embedding 的模型；
+     *       平台实现可以覆写以表达偏好
+     */
+    async resolveDefaultModel(): Promise<string | undefined>{
+        const modelProvider = this.modelProvider;
+        if (modelProvider === null) return undefined;
+
+        const models = modelProvider.availableModels ?? await modelProvider.initModels();
+        const candidate = models.find(
+            (model) => model.supportCompletion && !model.isEmbeddingModel,
+        );
+        return candidate === undefined ? undefined : (candidate.name || candidate.id);
+    }
 
     /** 获取当前LLMProvider的协议适配器 */
     abstract get protocolAdapter(): ProtocolAdapter;

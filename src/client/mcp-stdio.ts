@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
-import { McpTransportError } from "./error";
-import { isRecord } from "./type";
-import type { JsonRpcMessage } from "./type";
-import type { McpSendOptions, McpTransport } from "./transport";
+import { McpTransportError } from "../tool/mcp/error";
+import { isRecord } from "../tool/mcp/type";
+import type { JsonRpcMessage } from "../tool/mcp/type";
+import type { McpSendOptions, McpTransport } from "../tool/mcp/transport";
 
 export type McpStdioTransportOptions = {
 

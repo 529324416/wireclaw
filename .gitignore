@@ -21,6 +21,7 @@ yarn-error.log*
 *.tsbuildinfo
 
 # 本地附件仓库（LocalFileHost 默认目录）
+/.wireclaw-files/
 /.rotom-files/
 
 # 本地 API key / 环境变量
