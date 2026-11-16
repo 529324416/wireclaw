@@ -2,8 +2,10 @@
 
 import type { AttachmentFile } from "./attachment";
 import { handleSessionError } from "./error";
+import type { GeneratedMedia } from "./media";
 import type { AssistantMessage, Message } from "./message";
 import type {
+    AttachmentRef,
     AttachmentWireMap,
     ChatOptions,
     ChatResult,
@@ -68,6 +70,39 @@ export abstract class ProtocolAdapter{
     abstract parseStreamChunk(raw: unknown): StreamChunk[];
 }
 
+/** 模型输入/输出模态 */
+export type ModelModality = "text" | "image" | "audio" | "video";
+
+/** 对话模型的模型级能力 */
+export type ChatModelCapabilities = {
+    input?: readonly ModelModality[];
+    output?: readonly ModelModality[];
+    streaming?: boolean;
+    tools?: boolean;
+    context?: boolean;
+};
+
+/** 生成模型（生图/生语音/生视频）的模型级能力 */
+export type GenerationModelCapabilities = {
+    image?: boolean;
+    audio?: boolean;
+    video?: boolean;
+    async?: boolean;
+    context?: boolean;
+};
+
+/** 决策模型的模型级能力 */
+export type DecisionModelCapabilities = {
+    structuredOutput?: boolean;
+};
+
+/** 按模型声明的能力；Provider 只是模型容器 */
+export type ModelCapabilities = {
+    chat?: ChatModelCapabilities;
+    generate?: GenerationModelCapabilities;
+    decide?: DecisionModelCapabilities;
+};
+
 /** 模型信息 */
 export type ModelInfo = {
 
@@ -100,6 +135,9 @@ export type ModelInfo = {
 
     /** 是否为嵌入模型 */
     isEmbeddingModel: boolean;
+
+    /** 模型级能力；未声明时由调用方按传统字段推断 */
+    capabilities?: ModelCapabilities;
 
     /** 模型版本号 */
     version?: string;
@@ -217,19 +255,116 @@ export abstract class CloudFileManager{
     }
 }
 
-/** LLM服务提供者，可以是本地Ollama，云端OpenAI、DeepSeek，也可以是中转站等各类服务商
- * @description 继承该类，通过整合ModelProvider、ProtocolAdapter、CloudFileManager来构造不同平台的LLM服务
-*/
-export abstract class LLMProvider{
+/* ---------------------------------------------------------------------------
+ * 能力契约
+ *
+ * AIProvider 只是在“平台/模型”这一层的统一门面；具体能力由独立接口表达。
+ * Session 只绑定 ChatCapability，Generation/Decision 由独立运行时消费。
+ * ------------------------------------------------------------------------- */
 
-    static readonly TYPE: string = 'LLMProvider';
+/** 媒体生成模态 */
+export type GenerationModality = "image" | "audio" | "video";
+
+/** 媒体生成请求
+ * @note 具体参数由各 Provider 解释；公共字段只覆盖跨平台都需要的部分。
+ */
+export type GenerationRequest = {
+    modality: GenerationModality;
+    prompt: string;
+    references?: readonly AttachmentRef[];
+    context?: readonly Message[];
+    parameters?: Record<string, unknown>;
+};
+
+/** 生成任务进度 */
+export type GenerationProgress = {
+    progress?: number;
+    total?: number;
+    message?: string;
+    updatedAt?: number;
+};
+
+export type GenerationTaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+
+/** 生成任务句柄；同步生成可以返回已完成任务，异步生成由上层轮询/等待 */
+export interface GenerationTask {
+    readonly id: string;
+    readonly status: GenerationTaskStatus;
+    readonly progress?: GenerationProgress;
+    readonly result?: readonly GeneratedMedia[];
+    readonly error?: Error;
+
+    cancel(): Promise<void>;
+    wait(options?: { signal?: AbortSignal }): Promise<readonly GeneratedMedia[]>;
+}
+
+export type GenerationOptions = {
+    signal?: AbortSignal;
+    onProgress?: (progress: GenerationProgress) => void;
+};
+
+/** 生图 / 生语音 / 生视频能力 */
+export interface GenerationCapability {
+    generate(request: GenerationRequest, options?: GenerationOptions): Promise<GenerationTask>;
+}
+
+/** 决策模型可选择的动作 */
+export type DecisionAction = {
+    id: string;
+    description?: string;
+    parameters?: Record<string, unknown>;
+};
+
+/** 决策模型输入；不强制复用 Message[] */
+export type DecisionInput = {
+    state: unknown;
+    actions: readonly DecisionAction[];
+    context?: readonly Message[];
+    constraints?: Record<string, unknown>;
+};
+
+/** 决策模型输出 */
+export type DecisionResult = {
+    action: string;
+    arguments?: Record<string, unknown>;
+    confidence?: number;
+    reason?: string;
+};
+
+/** 决策能力 */
+export interface DecisionCapability {
+    decide(input: DecisionInput, options?: { signal?: AbortSignal }): Promise<DecisionResult>;
+}
+
+/** 对话能力；Session 只依赖这一能力 */
+export interface ChatCapability {
+    chat(
+        messages: readonly Message[],
+        options: SessionRuntimeOptions,
+        turn?: ChatOptions,
+    ): Promise<ChatResult>;
+}
+
+/** Provider 当前实现的能力集合 */
+export type ProviderCapability = "chat" | "generate" | "decide";
+
+/** AI 服务提供者基类
+ *
+ * - 只负责平台/模型的公共元信息与生命周期
+ * - 不强制实现 chat / generate / decide；由子类按能力实现对应接口
+ * - ProtocolAdapter、鉴权、端点选择都属于 Provider 内部实现
+ */
+export abstract class AIProvider{
+
+    static readonly TYPE: string = 'AIProvider';
+
     /** 类型名称，用于构造模型工厂 */
-    get typeName(): string{ return (this.constructor as typeof LLMProvider).TYPE; }
+    get typeName(): string{ return (this.constructor as typeof AIProvider).TYPE; }
 
-    /** 获取当前LLMProvider的模型管理器，不依赖模型或者不支持模型
-     * 的LLMProvider可以返回null，表示不支持模型管理
-     */
-    abstract get modelProvider(): ModelProvider | null;
+    abstract get title(): string;
+
+    /** 当前 Provider 的模型管理器；null 表示不提供模型列表 */
+    get modelProvider(): ModelProvider | null { return null; }
 
     /** 该 Provider 是否支持工具调用。UI 可据此禁用相关功能 */
     get supportsTools(): boolean { return false; }
@@ -239,6 +374,19 @@ export abstract class LLMProvider{
 
     /** 该 Provider 是否具备附件处理能力；模型级能力由具体实现进一步约束 */
     get supportsAttachments(): boolean { return this.cloudFileManager !== null; }
+
+    /** 当前 Provider 实际实现的能力；由方法存在性推导，避免额外的布尔标志失配 */
+    get capabilities(): readonly ProviderCapability[]{
+        const capabilities: ProviderCapability[] = [];
+        const candidate = this as AIProvider & Partial<
+            ChatCapability & GenerationCapability & DecisionCapability
+        >;
+
+        if (typeof candidate.chat === "function") capabilities.push("chat");
+        if (typeof candidate.generate === "function") capabilities.push("generate");
+        if (typeof candidate.decide === "function") capabilities.push("decide");
+        return capabilities;
+    }
 
     /** 选择默认模型；返回 undefined 表示没有可选模型
      * @note 默认实现选择第一个支持 completion 且非 embedding 的模型；
@@ -255,15 +403,10 @@ export abstract class LLMProvider{
         return candidate === undefined ? undefined : (candidate.name || candidate.id);
     }
 
-    /** 获取当前LLMProvider的协议适配器 */
-    abstract get protocolAdapter(): ProtocolAdapter;
-
-    abstract get title(): string;
-
     /** 尝试初始化当前的模型提供器 */
     async tryInitModelProvider(onError: (id: string, e: Error) => void): Promise<void>{
 
-        const typeName = (this.constructor as typeof LLMProvider).TYPE;
+        const typeName = (this.constructor as typeof AIProvider).TYPE;
         try{
             if (!this.modelProvider || this.modelProvider.isModelsInitialized) return;
             await this.modelProvider.initModels();
@@ -273,18 +416,23 @@ export abstract class LLMProvider{
             });
         }
     }
+}
 
-    /**
-     * 统一的单轮调用接口。
-     * - 传 onToken：流式输出
-     * - 传 tools：支持工具调用
-     * - 二者可以同时使用
-     *
-     * @note 错误契约：实现者必须抛 SessionError（或包装后抛出）。
-     */
-    abstract send(
-        messages: readonly Message[],
-        options: SessionRuntimeOptions,
-        turn?: ChatOptions,
-    ): Promise<ChatResult>;
+/** 可被 Session 直接绑定的对话 Provider */
+export type ChatProvider = AIProvider & ChatCapability;
+
+export function isChatProvider(provider: AIProvider): provider is ChatProvider {
+    return typeof (provider as Partial<ChatCapability>).chat === "function";
+}
+
+export type GenerationProvider = AIProvider & GenerationCapability;
+
+export function isGenerationProvider(provider: AIProvider): provider is GenerationProvider {
+    return typeof (provider as Partial<GenerationCapability>).generate === "function";
+}
+
+export type DecisionProvider = AIProvider & DecisionCapability;
+
+export function isDecisionProvider(provider: AIProvider): provider is DecisionProvider {
+    return typeof (provider as Partial<DecisionCapability>).decide === "function";
 }

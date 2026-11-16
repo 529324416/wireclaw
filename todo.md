@@ -56,8 +56,16 @@ MCP 并不只是「跨进程提供工具」：
 
 ### 工程化
 
+- [x] `AIProvider` 能力契约：`chat` / `generate` / `decide`，`send` 重命名为 `chat`
+- [ ] Model 级 capabilities：按模型声明能力、输入/输出模态，而不是只按 Provider 声明
 - [x] `createNewSession` 组装入口：新历史、可选附件管理器、可选运行时选项、默认模型解析
 - [x] 构建与分发：tsup 输出 browser/node bundle，tsc 输出声明，`exports` / `files` / `prepublishOnly`
+- [x] MiniMax H3-Image `GenerationCapability`（URL / b64_json + 模型级 capabilities）
+- [x] MiniMax H3-Image 实机测试（国内站 `https://api.minimax.cn`，1K PNG）
+- [x] MiniMax H3 视频异步任务 `GenerationTask`（创建 / 轮询 / 取消 / 恢复）
+- [x] MiniMax H3 视频实机测试（4s / 768P / 16:9，H.264 + AAC）
+- [x] MiniMax Chat Provider（M3/M2 文本对话、模型列表、流式与工具调用）
+- [x] MiniMax Chat 实机测试（国内站，流式文本）
 - [ ] 多 Server 配置加载
 - [ ] 工具 allowlist / 按 Server 的审批、并发、超时覆盖
 - [ ] 鉴权（OAuth / 动态注册）—— 暂缓
@@ -94,7 +102,7 @@ MCP 并不只是「跨进程提供工具」：
 - [ ] 大文件流式读取/哈希/上传（当前主要在内存中处理）
 - [ ] 图片预处理：尺寸/EXIF/压缩、token 估算、单请求图片数量限制
 - [ ] MCP `image` / `audio` / `resource` 接入 `IFileHost`，替换文本占位
-- [ ] 助手流式附件输出（`ASSISTANT_TOKEN_ATTACHMENT` 尚未使用）
+- [x] Chat 输出媒体落盘入口（`ChatResult.attachments` / `ChatOptions.onAttachment` / `ASSISTANT_ATTACHMENT`；具体 Provider 待接）
 - [ ] 远端文件清理/删除策略、缓存持久化与重启重建
 - [ ] 恢复会话时的附件存在性校验与缺失文件 UX
 - [ ] URL 附件的长度限制、下载超时与 SSRF 防护
@@ -115,6 +123,6 @@ MCP 并不只是「跨进程提供工具」：
 - 多模态内容等附件系统完成后再补。
 - 封闭开发阶段不保留向后兼容代码；序列化只接受当前 schema。
 - 附件历史只保存 contentHash；Provider 切换后按新 Provider 重新解析。
-- 允许自由切换 LLMProvider， Provider 实例与 CloudFileManager 缓存应复用。
+- 允许自由切换 AIProvider， Provider 实例与 CloudFileManager 缓存应复用。
 - DeepSeek 测试 key 仅本地使用，必须保持在 `.gitignore` 内。
 - 附件系统仍需补齐生命周期、错误类型、浏览器宿主和 MCP 多模态接入。

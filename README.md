@@ -34,9 +34,9 @@ npm install wireclaw
 ## Quick start: Node + Ollama
 
 ```ts
-import { createNewSession, OllamaLLMProvider } from "wireclaw";
+import { createNewSession, OllamaProvider } from "wireclaw";
 
-const session = createNewSession(new OllamaLLMProvider());
+const session = createNewSession(new OllamaProvider());
 
 const run = await session.run("Hello, introduce yourself");
 console.log(run.status);
@@ -47,13 +47,28 @@ console.log(run.status);
 DeepSeek:
 
 ```ts
-import { DeepSeekLLMProvider, createNewSession } from "wireclaw";
+import { DeepSeekProvider, createNewSession } from "wireclaw";
 
-const llm = new DeepSeekLLMProvider({
+const llm = new DeepSeekProvider({
   apiKey: process.env.DEEPSEEK_API_KEY!,
 });
 
 const session = createNewSession(llm);
+await session.run("Hello");
+```
+
+MiniMax (mainland China endpoint):
+
+```ts
+import { MiniMaxChatProvider, createNewSession } from "wireclaw";
+
+const provider = new MiniMaxChatProvider({
+  apiKey: process.env.MINIMAX_API_KEY!,
+  baseUrl: "https://api.minimax.cn",
+  model: "MiniMax-M3.1-Flash",
+});
+
+const session = createNewSession(provider);
 await session.run("Hello");
 ```
 
@@ -62,7 +77,7 @@ await session.run("Hello");
 ```ts
 import { readFile } from "node:fs/promises";
 
-import { AttachmentFileManager, OllamaLLMProvider, createNewSession } from "wireclaw";
+import { AttachmentFileManager, OllamaProvider, createNewSession } from "wireclaw";
 import { LocalFileHost, readLocalSourcePath } from "wireclaw/node";
 
 const path = "/absolute/path/photo.png";
@@ -73,7 +88,7 @@ const attachmentManager = new AttachmentFileManager(host, {
   readSourcePath: readLocalSourcePath,
 });
 
-const session = createNewSession(new OllamaLLMProvider(), attachmentManager);
+const session = createNewSession(new OllamaProvider(), attachmentManager);
 const file = await attachmentManager.put("photo.png", bytes, "image/png", [path]);
 
 await session.run([
@@ -90,13 +105,13 @@ await session.run([
 import {
   AttachmentFileManager,
   createNewSession,
-  OllamaLLMProvider,
+  OllamaProvider,
   OpfsFileHost,
 } from "wireclaw/browser";
 
 const host = new OpfsFileHost();
 const attachmentManager = new AttachmentFileManager(host);
-const session = createNewSession(new OllamaLLMProvider(), attachmentManager);
+const session = createNewSession(new OllamaProvider(), attachmentManager);
 
 await session.run("Hello");
 ```

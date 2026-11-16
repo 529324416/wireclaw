@@ -4,7 +4,8 @@ import type { AttachmentFile } from "../session/attachment";
 import { SessionError, SessionErrorType } from "../session/error";
 import { AssistantMessage, ToolMessage } from "../session";
 import type { Message } from "../session";
-import { CloudFileManager, LLMProvider, ModelProvider, ProtocolAdapter } from "../session/protocol";
+import { AIProvider, CloudFileManager, ModelProvider, ProtocolAdapter } from "../session/protocol";
+import type { ChatCapability } from "../session/protocol";
 import type { ModelInfo } from "../session";
 import type {
     AttachmentWireMap,
@@ -499,8 +500,8 @@ export class OllamaCloudFileManager extends CloudFileManager{
     }
 }
 
-/** Ollama LLMProvider：整合 ModelProvider + ProtocolAdapter + CloudFileManager + /api/chat */
-export class OllamaLLMProvider extends LLMProvider{
+/** Ollama Provider：整合 ModelProvider + ProtocolAdapter + CloudFileManager + /api/chat */
+export class OllamaProvider extends AIProvider implements ChatCapability{
 
     private readonly _baseUrl: string;
     private readonly _headers: Record<string, string>;
@@ -520,7 +521,7 @@ export class OllamaLLMProvider extends LLMProvider{
         this._cloudFileManager = new OllamaCloudFileManager();
     }
 
-    get modelProvider(): OllamaModelProvider{ return this._modelProvider; }
+    override get modelProvider(): OllamaModelProvider{ return this._modelProvider; }
     get protocolAdapter(): OllamaProtocolAdapter{ return this._protocolAdapter; }
     override get cloudFileManager(): OllamaCloudFileManager{ return this._cloudFileManager; }
     get title(): string{ return "Ollama"; }
@@ -539,7 +540,7 @@ export class OllamaLLMProvider extends LLMProvider{
         return (preferred ?? candidates[0])?.name;
     }
 
-    async send(
+    async chat(
         messages: readonly Message[],
         options: SessionRuntimeOptions,
         turn?: ChatOptions,
@@ -659,6 +660,10 @@ export class OllamaLLMProvider extends LLMProvider{
                         if (chunk.text.length > 0){
                             turn?.onToken?.(chunk.text, true);
                         }
+                        break;
+
+                    case "attachment":
+                        turn?.onAttachment?.(chunk.attachment);
                         break;
 
                     case "tool_call_delta": {

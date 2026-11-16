@@ -8,8 +8,9 @@ import { detectImageMimeType } from "./src/file";
 import { LocalFileHost, readLocalSourcePath } from "./src/file/local";
 import {
     DEEPSEEK_DEFAULT_BASE_URL,
-    DeepSeekLLMProvider,
-    OllamaLLMProvider,
+    DeepSeekProvider,
+    MiniMaxChatProvider,
+    OllamaProvider,
 } from "./src/platform/index";
 import { createMcpProvider, LocalToolProvider } from "./src/client";
 import {
@@ -23,7 +24,7 @@ import {
     SessionSerializer,
     ToolRegistry,
 } from "./src/session/index";
-import type { LLMProvider } from "./src/session/protocol";
+import type { ChatProvider } from "./src/session/protocol";
 import { SessionEventType } from "./src/session/type";
 import type {
     SessionEvent,
@@ -39,20 +40,24 @@ import type {
  *   npx tsx client.ts
  *
  * 环境变量：
- *   WIRECLAW_PROVIDER      启动时使用的 Provider：ollama / deepseek，默认 ollama
+ *   WIRECLAW_PROVIDER      启动时使用的 Provider：ollama / deepseek / minimax，默认 ollama
  *   OLLAMA_BASE_URL    默认 http://127.0.0.1:11434
  *   OLLAMA_MODEL       不填时优先选择 qwen3.5 9b，否则选择第一个支持 completion 的非 embedding 模型
  *   DEEPSEEK_API_KEY   直接指定 DeepSeek API key（优先于文件）
- *   DEEPSEEK_API_KEY_FILE 默认 ./ds-apikey.txt
+ *   DEEPSEEK_API_KEY_FILE 默认 ./apikey-ds.txt
  *   DEEPSEEK_BASE_URL  默认 https://api.deepseek.com
  *   DEEPSEEK_MODEL     默认 deepseek-flash
+ *   MINIMAX_API_KEY    直接指定 MiniMax API key（优先于文件）
+ *   MINIMAX_API_KEY_FILE 默认 ./apikey-minimax-h3.txt
+ *   MINIMAX_BASE_URL   默认 https://api.minimax.cn
+ *   MINIMAX_MODEL      默认 MiniMax-M3.1-Flash
  *   WIRECLAW_MCP_URL      默认 http://127.0.0.1:5000/mcp
  *   WIRECLAW_MCP_ID       MCP 工具名前缀，默认 mcp
  *   WIRECLAW_MCP_DISABLE  设为 1 时不注册 MCP Provider
  *
  * 命令：
  *   /exit                                退出
- *   /provider [providerId]               查看/切换 LLM Provider（ollama / deepseek）
+ *   /provider [providerId]               查看/切换 LLM Provider（ollama / deepseek / minimax）
  *   /model <model-name>                  切换当前 Provider 的模型
  *   /list_models                         列出当前 Provider 的可用模型及能力
  *   /tools                               列出当前可用的工具（含 MCP）
@@ -72,16 +77,19 @@ const SUPPORTED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".
 
 const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL ?? DEEPSEEK_DEFAULT_BASE_URL;
 const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL ?? "deepseek-flash";
-const DEEPSEEK_API_KEY_FILE = process.env.DEEPSEEK_API_KEY_FILE ?? "./ds-apikey.txt";
+const DEEPSEEK_API_KEY_FILE = process.env.DEEPSEEK_API_KEY_FILE ?? "./apikey-ds.txt";
+const MINIMAX_BASE_URL = process.env.MINIMAX_BASE_URL ?? "https://api.minimax.cn";
+const MINIMAX_MODEL = process.env.MINIMAX_MODEL ?? "MiniMax-M3.1-Flash";
+const MINIMAX_API_KEY_FILE = process.env.MINIMAX_API_KEY_FILE ?? "./apikey-minimax-h3.txt";
 
-const PROVIDER_IDS = ["ollama", "deepseek"] as const;
+const PROVIDER_IDS = ["ollama", "deepseek", "minimax"] as const;
 type ProviderId = (typeof PROVIDER_IDS)[number];
 
 type ProviderRuntime = {
     id: ProviderId;
     label: string;
     endpoint: string;
-    llm: LLMProvider;
+    provider: ChatProvider;
     model: string;
 };
 
@@ -136,7 +144,7 @@ function parsePermission(value: string): SessionPermission | null {
     }
 }
 
-async function resolveInitialModel(provider: OllamaLLMProvider): Promise<string> {
+async function resolveInitialModel(provider: OllamaProvider): Promise<string> {
     const configured = process.env.OLLAMA_MODEL;
     if (configured !== undefined && configured.length > 0) {
         await provider.modelProvider.validateNetwork();
@@ -162,13 +170,20 @@ function normalizeProviderId(value: string): ProviderId | null {
         case "deepseek":
         case "ds":
             return "deepseek";
+        case "minimax":
+        case "mini":
+            return "minimax";
         default:
             return null;
     }
 }
 
 function providerLabel(id: ProviderId): string {
-    return id === "ollama" ? "Ollama" : "DeepSeek";
+    switch (id) {
+        case "ollama": return "Ollama";
+        case "deepseek": return "DeepSeek";
+        case "minimax": return "MiniMax";
+    }
 }
 
 async function readDeepSeekApiKey(): Promise<string> {
@@ -194,23 +209,46 @@ async function readDeepSeekApiKey(): Promise<string> {
     return key;
 }
 
+async function readMiniMaxApiKey(): Promise<string> {
+    const configured = process.env.MINIMAX_API_KEY?.trim();
+    if (configured !== undefined && configured.length > 0) return configured;
+
+    const keyPath = resolve(process.cwd(), sanitizePathInput(MINIMAX_API_KEY_FILE));
+    let raw: string;
+    try {
+        raw = await readFile(keyPath, "utf8");
+    } catch {
+        throw new Error(`MiniMax API key file is not readable: ${keyPath}`);
+    }
+
+    let key = raw.replace(/^\uFEFF/, "").trim();
+    const assignment = /^MINIMAX_API_KEY\s*=\s*(.+)$/m.exec(key);
+    if (assignment !== null) key = assignment[1]?.trim() ?? "";
+    key = key.replace(/^["']|["']$/g, "").trim();
+
+    if (key.length === 0) {
+        throw new Error(`MiniMax API key file is empty: ${keyPath}`);
+    }
+    return key;
+}
+
 async function createProvider(id: ProviderId): Promise<ProviderRuntime> {
     switch (id) {
         case "ollama": {
-            const llm = new OllamaLLMProvider(BASE_URL);
-            const model = await resolveInitialModel(llm);
+            const provider = new OllamaProvider(BASE_URL);
+            const model = await resolveInitialModel(provider);
             return {
                 id,
                 label: providerLabel(id),
                 endpoint: BASE_URL,
-                llm,
+                provider,
                 model,
             };
         }
 
         case "deepseek": {
             const apiKey = await readDeepSeekApiKey();
-            const llm = new DeepSeekLLMProvider({
+            const provider = new DeepSeekProvider({
                 apiKey,
                 baseUrl: DEEPSEEK_BASE_URL,
             });
@@ -218,14 +256,30 @@ async function createProvider(id: ProviderId): Promise<ProviderRuntime> {
                 id,
                 label: providerLabel(id),
                 endpoint: DEEPSEEK_BASE_URL,
-                llm,
+                provider,
                 model: DEEPSEEK_MODEL,
+            };
+        }
+
+        case "minimax": {
+            const apiKey = await readMiniMaxApiKey();
+            const provider = new MiniMaxChatProvider({
+                apiKey,
+                baseUrl: MINIMAX_BASE_URL,
+                model: MINIMAX_MODEL,
+            });
+            return {
+                id,
+                label: providerLabel(id),
+                endpoint: MINIMAX_BASE_URL,
+                provider,
+                model: MINIMAX_MODEL,
             };
         }
     }
 }
 
-/** Provider 实例缓存：切换回来时复用同一个 LLMProvider 与其 CloudFileManager 缓存 */
+/** Provider 实例缓存：切换回来时复用同一个 AIProvider 与其 CloudFileManager 缓存 */
 const providerCache = new Map<ProviderId, Promise<ProviderRuntime>>();
 
 async function getProvider(id: ProviderId): Promise<ProviderRuntime> {
@@ -282,7 +336,7 @@ async function main(): Promise<void> {
     const attachmentManager = new AttachmentFileManager(fileHost, {
         readSourcePath: readLocalSourcePath,
     });
-    const session = new Session(currentProviderRuntime.llm, history, runtimeOptions, attachmentManager);
+    const session = new Session(currentProviderRuntime.provider, history, runtimeOptions, attachmentManager);
 
     const registry = new ToolRegistry({
         onProviderError: (providerId, error) => {
@@ -425,6 +479,14 @@ async function main(): Promise<void> {
                 }
                 break;
 
+            case SessionEventType.ASSISTANT_ATTACHMENT:
+                process.stdout.write(
+                    `\n[attachment] ${event.name ?? event.attachment.contentHash}`
+                    + (event.mimeType !== undefined ? ` (${event.mimeType})` : "")
+                    + "\n",
+                );
+                break;
+
             case SessionEventType.TOOL_CALL_START:
                 process.stdout.write(`\n[tool] ${event.call.name} ${shortJson(event.call.params)}\n`);
                 break;
@@ -527,13 +589,13 @@ async function main(): Promise<void> {
                             const suffix = marks.length > 0 ? ` [${marks.join(", ")}]` : "";
                             console.log(`  - ${id} (${providerLabel(id)})${suffix}`);
                         }
-                        console.log("usage: /provider <ollama|deepseek>");
+                        console.log("usage: /provider <ollama|deepseek|minimax>");
                         continue;
                     }
 
                     const requested = normalizeProviderId(requestedRaw);
                     if (requested === null) {
-                        console.log(`usage: /provider <ollama|deepseek> (current: ${currentProviderRuntime.id})`);
+                        console.log(`usage: /provider <ollama|deepseek|minimax> (current: ${currentProviderRuntime.id})`);
                         continue;
                     }
                     if (session.isBusy) {
@@ -547,7 +609,7 @@ async function main(): Promise<void> {
 
                     try {
                         const next = await getProvider(requested);
-                        session.setLLM(next.llm);
+                        session.setProvider(next.provider);
                         session.switchModel(next.model);
                         currentProviderRuntime = next;
                         currentModel = next.model;
@@ -577,7 +639,7 @@ async function main(): Promise<void> {
                 }
 
                 if (command === "list_models" || command === "models") {
-                    const modelProvider = currentProviderRuntime.llm.modelProvider;
+                    const modelProvider = currentProviderRuntime.provider.modelProvider;
                     if (modelProvider === null) {
                         console.log("[list_models] current provider has no model provider");
                         continue;
@@ -658,7 +720,7 @@ async function main(): Promise<void> {
                     }
 
                     try {
-                        const modelProvider = currentProviderRuntime.llm.modelProvider;
+                        const modelProvider = currentProviderRuntime.provider.modelProvider;
                         if (modelProvider !== null) {
                             try {
                                 const models = modelProvider.availableModels

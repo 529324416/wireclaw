@@ -29,9 +29,10 @@ src/
                  AttachmentFile / IFileHost / AttachmentFileManager、
                  ToolDefinition / ToolProvider / ToolRegistry、消息、事件、
                  AgentLoop、审批状态机、CloudFileManager、序列化
-  platform/      LLM 平台实现
-                 ollama.ts   ProtocolAdapter / ModelProvider / LLMProvider
-                 deepseek.ts ProtocolAdapter / ModelProvider / CloudFileManager / LLMProvider
+  platform/      AI 平台实现
+                 ollama.ts   ProtocolAdapter / ModelProvider / AIProvider
+                 deepseek.ts ProtocolAdapter / ModelProvider / CloudFileManager / AIProvider
+                 minimax/    MiniMax H3-Image / H3 Video GenerationCapability
   tool/          MCP 协议客户端与 HTTP 传输（浏览器安全）
     mcp/         type / error / transport / http / client / naming / provider
   client/        Node-only 参考客户端实现（不进入核心/浏览器入口）
@@ -49,6 +50,28 @@ platform      tool         file
 ```
 
 一句话：**session 只决定「如何与它交流、如何运行」；任何实现（本地工具、MCP、Ollama、DeepSeek、附件宿主）都在外部。**
+
+### AIProvider 与能力边界
+
+`AIProvider` 是平台/模型的统一门面，但不强制实现所有能力：
+
+- `ChatCapability`：对话，`Session` 只绑定这一能力；
+- `GenerationCapability`：生图 / 生语音 / 生视频，由独立生成运行时消费；
+- `DecisionCapability`：决策模型，由独立决策运行时消费。
+
+能力通过接口实现和类型守卫判断（`isChatProvider` / `isGenerationProvider` / `isDecisionProvider`），而不是把不支持的方法做成空实现。`ProtocolAdapter`、鉴权、端点选择和任务查询都封装在具体 Provider 内部，Session 不感知。
+
+`ModelInfo.capabilities` 用于声明**模型级**能力，而不是平台级能力：
+
+```ts
+capabilities: {
+  chat?: { input?: ModelModality[]; output?: ModelModality[]; ... };
+  generate?: { image?: boolean; audio?: boolean; video?: boolean; async?: boolean; ... };
+  decide?: { structuredOutput?: boolean };
+}
+```
+
+例如 MiniMax-H3-Image 只有 `generate.image = true`，没有 `chat`；Session 不会把它误绑成对话 Provider。
 
 ### 包入口
 
@@ -75,7 +98,7 @@ const attachmentManager = new AttachmentFileManager(host, {
 });
 
 const session = createNewSession(
-  llm,                 // 由上级对象维护，每个平台协议一个实例
+  provider,            // 由上级对象维护，必须实现 ChatCapability
   attachmentManager,   // 可省略，表示不使用附件
   // runtimeOptions 可省略
 );
@@ -85,7 +108,7 @@ await session.run("hello");
 
 - 不传 `runtimeOptions` 时，`Session` 在首次运行前向 Provider 询问默认模型；
 - `think` / `thinkingLv` 未设置时保持 Provider 默认；
-- 附件管理器、LLMProvider、运行时选项由上级对象维护，工厂只负责组装；
+- 附件管理器、AIProvider、运行时选项由上级对象维护，工厂只负责组装；
 - 恢复历史会话不走这个入口：使用 `SessionSerializer.deserialize` 后自行构造 `Session`。
 
 ### 构建与发布
@@ -256,6 +279,31 @@ close(): Promise<void>
 - 附件缺失或恢复失败时视为数据损坏，在调用模型前失败；
 - 失败运行不会污染历史。
 
+### Chat 输出媒体落盘
+
+Chat Provider 可以通过三种方式返回媒体：
+
+- 非流式：`ChatResult.attachments`；
+- 流式：`ChatOptions.onAttachment` / `StreamChunk.attachment`；
+- 最终 `AssistantMessage` 中只保存 `AttachmentRef`。
+
+Session 收到 `PendingAttachment` 后调用 `AttachmentIngestor`：
+
+```text
+PendingAttachment (bytes / url / remote-id)
+  → AttachmentIngestor
+  → AttachmentFileManager.put
+  → AttachmentRef
+  → AssistantMessage.content
+  → ASSISTANT_ATTACHMENT 事件
+```
+
+- `AttachmentIngestor` 不负责生成任务轮询，只负责媒体规范化、下载和落盘；
+- URL 下载只允许 http/https，默认拒绝 localhost / 私有地址，并校验大小和 MIME；
+- `remote-id` 需要宿主注入 `resolveRemote`；
+- 没有 `AttachmentFileManager` 时，Provider 返回媒体会让本次运行失败，不会静默丢弃；
+- 流式与最终结果使用 `sourceId` 去重，最终结果覆盖同 sourceId 的流式片段。
+
 ### Provider 实现
 
 - **Ollama**
@@ -271,6 +319,28 @@ close(): Promise<void>
   - 404/410 自动重新上传；
   - 距离过期不足 5 分钟时主动重传；
   - 同一 `contentHash` 并发 ensure 使用 single-flight。
+- **MiniMax H3-Image**
+  - 只实现 `GenerationCapability`，不实现 `ChatCapability`；
+  - `POST /v1/images/generations`，模型 `MiniMax-H3-Image`；
+  - 支持 `response_format: "url"` 与 `"b64_json"`；
+  - 默认 `area: "1K"`、`n: 1`、`output_format: "png"`，服务端超时默认 600s；
+  - `ModelInfo.capabilities.generate.image = true`，`chat` 为空；
+  - 结果返回 `GeneratedMedia[]`，由生成运行时或宿主交给 `AttachmentIngestor`；
+  - 实机测试发现平台可能省略/错报 `output_format`，落盘时以文件头识别结果为准，并同步修正扩展名。
+- **MiniMax H3 Video**
+  - 只实现 `GenerationCapability`，返回异步 `GenerationTask`；
+  - `POST /v2/video_generation` 创建任务，`GET /v2/query/video_generation/{task_id}` 轮询；
+  - 查询响应可能是 `{ task: {...} }`，Provider 会兼容包装与顶层两种结构；
+  - 默认 `duration: 4`、`resolution: "768P"`、`ratio: "16:9"`，降低测试成本；
+  - `GenerationTask.cancel()` 调用 `DELETE /v2/video_generation/{task_id}`；
+  - 实机测试输出：4.46s，1344×768，H.264 + AAC，约 990KB。
+- **MiniMax Chat**
+  - OpenAI 兼容 `POST /v1/chat/completions`，`GET /v1/models`；
+  - 模型目录包含 `MiniMax-M3.1-Flash` / `MiniMax-M3` / M2 系列；
+  - 支持流式文本、reasoning_content、工具调用、usage；
+  - `ModelInfo.capabilities.chat` 声明 streaming / tools / context；
+  - 暂不支持 Chat 附件输入，`cloudFileManager` 为空；
+  - CLI 可通过 `WIRECLAW_PROVIDER=minimax` 或 `/provider minimax` 切换。
 
 ### 序列化
 
@@ -311,7 +381,7 @@ close(): Promise<void>
 - `DeepSeekCloudFileManager`
   - 上传、缓存、校验、404 重传、TTL；
   - 支持注入 `fetch`，方便浏览器/Electron 走宿主代理。
-- `DeepSeekLLMProvider`
+- `DeepSeekProvider`
   - Chat Completions + SSE；
   - `thinking` / `reasoning_effort` 映射；
   - tool calls、usage、错误处理；
@@ -327,7 +397,7 @@ close(): Promise<void>
 ### 配置
 
 ```ts
-new DeepSeekLLMProvider({
+new DeepSeekProvider({
   apiKey,
   baseUrl: "https://api.deepseek.com",
   headers: {},

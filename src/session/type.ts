@@ -1,6 +1,7 @@
 /* Session模块类型定义 */
 
 import { ToolError, type ToolErrorType } from "./error";
+import type { PendingAttachment } from "./media";
 import type { AssistantMessage } from "./message";
 
 /** 附件引用（只保存内容指纹，不保存文件名、路径或远端文件ID） */
@@ -261,8 +262,8 @@ export const SessionEventType = {
     /** 助手流式输出 */
     ASSISTANT_TOKEN: 'assistant_token',
 
-    /** 助手流式输出附件 */
-    ASSISTANT_TOKEN_ATTACHMENT: 'assistant_token_attachment',
+    /** 助手输出附件（已落盘，携带 AttachmentRef） */
+    ASSISTANT_ATTACHMENT: 'assistant_attachment',
 
     /** 助手思考结束（没有思考过程的情况下也会触发） */
     ASSISTANT_THINKING_OVER: 'assistant_thinking_over',
@@ -314,7 +315,7 @@ export type SessionEvent =
     // 模型输出类消息
     | { type: typeof SessionEventType.ASSISTANT_START }
     | { type: typeof SessionEventType.ASSISTANT_TOKEN, token: string, isThinking: boolean }
-    | { type: typeof SessionEventType.ASSISTANT_TOKEN_ATTACHMENT, attachmentId: string, token: string, isThinking: boolean }
+    | { type: typeof SessionEventType.ASSISTANT_ATTACHMENT, attachment: AttachmentRef, name?: string, mimeType?: string }
     | { type: typeof SessionEventType.ASSISTANT_THINKING_OVER, thinking: string }
     | { type: typeof SessionEventType.ASSISTANT_COMPLETE_TURN, msg: MessageContent, usage: ChatUsage }
     | { type: typeof SessionEventType.ASSISTANT_COMPLETE, msg: MessageContent, usage: ChatUsage }
@@ -387,6 +388,10 @@ export type SessionRuntimeOptions = {
 export type ChatResult = {
 
     message: AssistantMessage;
+
+    /** Provider 在最终消息之外返回的媒体；由 Session 落盘后写入 message.content */
+    attachments?: readonly PendingAttachment[];
+
     // 原始响应，调试用
     raw?: unknown;               
 };
@@ -398,6 +403,9 @@ export type ChatOptions = {
 
     /** 模型输出回调 */
     onToken?: (token: MessageContent, isThinking: boolean) => void;
+
+    /** 模型输出媒体回调；媒体由 Session 统一落盘 */
+    onAttachment?: (attachment: PendingAttachment) => void;
 
     /** 本轮可用的工具定义；不传或空数组表示不启用工具调用 */
     tools?: ToolDefinition[];
@@ -428,6 +436,7 @@ export type StreamChunk =
     | { type: "text_delta"; text: string }
     | { type: "thinking_delta"; text: string }
     | { type: "tool_call_delta"; toolCall: StreamToolCallDelta }
+    | { type: "attachment"; attachment: PendingAttachment }
     | { type: "usage"; usage: ChatUsage }
     | { type: "done"; stopReason?: ChatStopReason }
     | { type: "error"; failureReason: ChatFailureReason; message?: string };

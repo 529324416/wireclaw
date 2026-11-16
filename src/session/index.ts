@@ -14,5 +14,7 @@ export * from './tool'
 export * from './host-tool'
 
 // 附件相关
+export * from './media'
 export * from './attachment'
 export * from './attachment-manager'
+export * from './attachment-ingestor'

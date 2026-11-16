@@ -4,7 +4,8 @@ import type { AttachmentFile } from "../session/attachment";
 import { SessionError, SessionErrorType } from "../session/error";
 import { AssistantMessage, ToolMessage } from "../session";
 import type { Message } from "../session";
-import { CloudFileManager, LLMProvider, ModelProvider, ProtocolAdapter } from "../session/protocol";
+import { AIProvider, CloudFileManager, ModelProvider, ProtocolAdapter } from "../session/protocol";
+import type { ChatCapability } from "../session/protocol";
 import type { ModelInfo } from "../session";
 import {
     ChatFailureReason,
@@ -554,8 +555,8 @@ export class DeepSeekCloudFileManager extends CloudFileManager {
     }
 }
 
-/** DeepSeek LLMProvider：OpenAI 兼容 Chat Completions + Files API */
-export class DeepSeekLLMProvider extends LLMProvider {
+/** DeepSeek Provider：OpenAI 兼容 Chat Completions + Files API */
+export class DeepSeekProvider extends AIProvider implements ChatCapability {
 
     private readonly _baseUrl: string;
     private readonly _headers: Record<string, string>;
@@ -577,7 +578,7 @@ export class DeepSeekLLMProvider extends LLMProvider {
         });
     }
 
-    get modelProvider(): DeepSeekModelProvider { return this._modelProvider; }
+    override get modelProvider(): DeepSeekModelProvider { return this._modelProvider; }
     get protocolAdapter(): DeepSeekProtocolAdapter { return this._protocolAdapter; }
     override get cloudFileManager(): DeepSeekCloudFileManager { return this._cloudFileManager; }
     get title(): string { return "DeepSeek"; }
@@ -595,7 +596,7 @@ export class DeepSeekLLMProvider extends LLMProvider {
         return preferred === undefined ? undefined : (preferred.id || preferred.name);
     }
 
-    async send(
+    async chat(
         messages: readonly Message[],
         options: SessionRuntimeOptions,
         turn?: ChatOptions,
@@ -708,6 +709,10 @@ export class DeepSeekLLMProvider extends LLMProvider {
                     case "thinking_delta":
                         thinking += chunk.text;
                         if (chunk.text.length > 0) turn?.onToken?.(chunk.text, true);
+                        break;
+
+                    case "attachment":
+                        turn?.onAttachment?.(chunk.attachment);
                         break;
 
                     case "tool_call_delta": {

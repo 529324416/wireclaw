@@ -1,9 +1,12 @@
 import { uniqueId } from "../base";
 import { SessionError, SessionErrorType, ToolError, ToolErrorType } from "./error";
 import type { AttachmentFileManager } from "./attachment-manager";
+import { AttachmentIngestor } from "./attachment-ingestor";
+import type { PendingAttachment } from "./media";
 import { AssistantMessage, ToolMessage, tool, user } from "./message";
 import type { Message } from "./message";
-import type { LLMProvider } from "./protocol";
+import { isChatProvider } from "./protocol";
+import type { AIProvider, ChatProvider } from "./protocol";
 import {
     ChatRoleAssistant,
     SessionPermission,
@@ -11,9 +14,11 @@ import {
     SessionEventType,
 } from "./type";
 import type {
+    AttachmentRef,
     AttachmentWireMap,
     ChatStopReason,
     ChatUsage,
+    ContentPart,
     MessageContent,
     RemoteFileRef,
     SessionEventListener,
@@ -381,6 +386,12 @@ export type RunOptions = {
 };
 
 /** 运行上下文 */
+/** 已落盘的媒体及其原始描述 */
+export type IngestedAttachment = {
+    attachment: PendingAttachment;
+    ref: AttachmentRef;
+};
+
 export type RunContext = {
 
     /** 会话快照 */
@@ -395,8 +406,8 @@ export type RunContext = {
     /** 会话事件发射器 */
     emit: SessionEventListener;
 
-    /** LLM提供器 */
-    llm: LLMProvider;
+    /** 当前绑定的对话 Provider（AIProvider + ChatCapability） */
+    provider: ChatProvider;
 
     /** 取消信号 */
     signal: AbortSignal;
@@ -429,6 +440,12 @@ export type RunContext = {
      * @note 由 Session 通过 IFileHost 和 CloudFileManager 实现，RunEngine 不感知附件细节
      */
     resolveAttachments: (messages: readonly Message[]) => Promise<AttachmentWireMap | undefined>;
+
+    /** 把 Provider 输出媒体落盘；无 AttachmentFileManager 时抛错 */
+    ingestAttachments: (
+        attachments: readonly PendingAttachment[],
+        signal: AbortSignal,
+    ) => Promise<readonly IngestedAttachment[]>;
 }
 
 export class RunEngine{
@@ -446,6 +463,7 @@ export class RunEngine{
         let thinkingAccum = "";
         let isThinkingState = true;
         let thinkingOverEmitted = false;
+        const streamedAttachments: PendingAttachment[] = [];
 
         const _onToken = (token: MessageContent, isThinking: boolean) => {
             const text = this._tokenToText(token);
@@ -467,14 +485,19 @@ export class RunEngine{
             });
         }
 
+        const _onAttachment = (attachment: PendingAttachment) => {
+            streamedAttachments.push(attachment);
+        };
+
         // 附件解析必须发生在 Adapter 转换之前；Adapter 本身不访问 IFileHost
         const messages = this._messages(ctx);
         const attachmentRefs = await ctx.resolveAttachments(messages);
 
         emit({ type: SessionEventType.ASSISTANT_START });
 
-        const chatResult = await ctx.llm.send(messages, ctx.runtimeOptions, {
+        const chatResult = await ctx.provider.chat(messages, ctx.runtimeOptions, {
             onToken: _onToken,
+            onAttachment: _onAttachment,
             signal: ctx.signal,
             tools: tools.length > 0 ? [...tools] : undefined,
             ...(attachmentRefs === undefined ? {} : { attachmentRefs }),
@@ -488,7 +511,7 @@ export class RunEngine{
             });
         }
 
-        const outputMsg = chatResult.message;
+        let outputMsg = chatResult.message;
 
         if (outputMsg.failureReason !== undefined){
             throw new SessionError(
@@ -496,6 +519,30 @@ export class RunEngine{
                 `Provider returned a failed assistant message: ${outputMsg.failureReason}`,
                 outputMsg.failureReason,
             );
+        }
+
+        // 合并所有附件进行去重，同时将流式附件的pendingAttachments落盘至ingestor
+        const pendingAttachments = mergePendingAttachments([
+            ...streamedAttachments,
+            ...(chatResult.attachments ?? []),
+        ]);
+
+        if (pendingAttachments.length > 0){
+            const ingested = await ctx.ingestAttachments(pendingAttachments, ctx.signal);
+            if (ingested.length > 0){
+                outputMsg = this._appendAttachments(
+                    outputMsg,
+                    ingested.map((item) => item.ref),
+                );
+                for (const item of ingested){
+                    emit({
+                        type: SessionEventType.ASSISTANT_ATTACHMENT,
+                        attachment: item.ref,
+                        name: item.attachment.name,
+                        mimeType: item.attachment.mimeType,
+                    });
+                }
+            }
         }
 
         ctx.run.appendMessage(outputMsg);
@@ -506,6 +553,32 @@ export class RunEngine{
         });
 
         return outputMsg;
+    }
+
+    /** 把已落盘的附件引用追加到助手消息内容末尾 */
+    private _appendAttachments(
+        message: AssistantMessage,
+        refs: readonly AttachmentRef[],
+    ): AssistantMessage{
+        if (refs.length === 0) return message;
+
+        const parts: ContentPart[] = typeof message.content === "string"
+            ? (message.content.length > 0 ? [{ type: "text", text: message.content }] : [])
+            : message.content.map((part) => ({ ...part }));
+
+        for (const ref of refs){
+            parts.push({ type: "attachment", attachment: { contentHash: ref.contentHash } });
+        }
+
+        return new AssistantMessage(
+            parts,
+            message.isCompressed,
+            message.thinking,
+            message.usage,
+            [...message.toolCalls],
+            message.stopReason,
+            message.failureReason,
+        );
     }
 
     /** 推进一次运行：对话 -> 工具调用循环 -> 最终输出 */
@@ -545,11 +618,11 @@ export class RunEngine{
             : await ctx.tools.listTools(ctx.signal);
 
         // host 工具本身依赖工具调用能力；不支持工具的 Provider 保持纯对话
-        if (ctx.enableUserInput && ctx.llm.supportsTools){
+        if (ctx.enableUserInput && ctx.provider.supportsTools){
             tools.push(...HOST_TOOL_DEFINITIONS);
         }
 
-        if (tools.length > 0 && !ctx.llm.supportsTools){
+        if (tools.length > 0 && !ctx.provider.supportsTools){
             throw new SessionError(
                 SessionErrorType.MissingTools,
                 "The current LLM provider does not support tool calls",
@@ -676,7 +749,7 @@ export class RunEngine{
         ctx.emit({ type: SessionEventType.TOOL_CALL_START, call });
 
         // host 内置工具：人工输入（不经过 ToolRegistry）
-        if (ctx.enableUserInput && ctx.llm.supportsTools && call.name === ASK_USER_TOOL_NAME){
+        if (ctx.enableUserInput && ctx.provider.supportsTools && call.name === ASK_USER_TOOL_NAME){
             return await this._askUser(ctx, call);
         }
 
@@ -814,8 +887,9 @@ export class Session{
 
     private _runtimeOptions: SessionRuntimeOptions;
     private _currentSession?: SessionHistory;
-    private _llm?: LLMProvider;
+    private _provider?: ChatProvider;
     private _attachmentManager?: AttachmentFileManager;
+    private _attachmentIngestor?: AttachmentIngestor;
 
     /** 当前会话的运行期附件映射；只在内存中存在，不进入 SessionData */
     private _attachmentRefs: AttachmentWireMap = new Map();
@@ -836,20 +910,26 @@ export class Session{
     } | null = null;
 
     constructor(
-        llm?: LLMProvider,
+        provider?: ChatProvider,
         history?: SessionHistory,
         options: SessionRuntimeOptions = {},
         attachmentManager?: AttachmentFileManager,
     ){
-        this._llm = llm;
+        this._provider = provider;
         this._currentSession = history;
         this._runtimeOptions = { ...options };
         this._attachmentManager = attachmentManager;
+        this._attachmentIngestor = attachmentManager === undefined
+            ? undefined
+            : new AttachmentIngestor(attachmentManager);
         this._runEngine = new RunEngine();
     }
 
     /** 当前会话数据 */
     get history(): SessionHistory | undefined{ return this._currentSession; }
+
+    /** 当前绑定的对话 Provider */
+    get provider(): ChatProvider | undefined{ return this._provider; }
 
     /** 当前运行时选项；返回副本，避免外部修改内部状态 */
     get runtimeOptions(): SessionRuntimeOptions{ return { ...this._runtimeOptions }; }
@@ -913,12 +993,20 @@ export class Session{
         this._runtimeOptions = { ...this._runtimeOptions, model };
     }
 
-    /** 设置 LLMProvider；运行中不允许切换
+    /** 设置对话 Provider；运行中不允许切换
+     * @note Session 只接受同时实现 ChatCapability 的 AIProvider；
+     *       纯生图/生视频/决策 Provider 由独立运行时消费。
      * @note 远端附件表示与 Provider 绑定，切换时必须丢弃旧映射
      */
-    setLLM(llm: LLMProvider): void{
-        this._assertIdle("switch LLM provider");
-        this._llm = llm;
+    setProvider(provider: AIProvider): void{
+        this._assertIdle("switch AI provider");
+        if (!isChatProvider(provider)){
+            throw new SessionError(
+                SessionErrorType.InvalidRequest,
+                "The selected AIProvider does not support chat",
+            );
+        }
+        this._provider = provider;
         this._attachmentRefs = new Map();
     }
 
@@ -928,6 +1016,9 @@ export class Session{
     setAttachmentManager(attachmentManager: AttachmentFileManager | undefined): void{
         this._assertIdle("switch attachment manager");
         this._attachmentManager = attachmentManager;
+        this._attachmentIngestor = attachmentManager === undefined
+            ? undefined
+            : new AttachmentIngestor(attachmentManager);
         this._attachmentRefs = new Map();
     }
 
@@ -1014,8 +1105,11 @@ export class Session{
         if (this._currentSession === undefined){
             throw new SessionError(SessionErrorType.MissingSession, "Session history is not set");
         }
-        if (this._llm === undefined){
-            throw new SessionError(SessionErrorType.MissingProvider, "LLMProvider is not set");
+        if (this._provider === undefined){
+            throw new SessionError(
+                SessionErrorType.MissingProvider,
+                "AIProvider is not set or does not support chat",
+            );
         }
 
         const maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
@@ -1061,8 +1155,8 @@ export class Session{
         }
 
         const history = this._currentSession;
-        const llm = this._llm;
-        await this._ensureRuntimeModel(llm);
+        const provider = this._provider;
+        await this._ensureRuntimeModel(provider);
         const inputMessage = user(input);
 
         const run = new Run(history.id);
@@ -1080,7 +1174,7 @@ export class Session{
             run,
             runtimeOptions: this._runtimeOptions,
             emit: (event) => this._emit(event),
-            llm,
+            provider,
             signal: abortController.signal,
             tools: options.tools,
             maxSteps,
@@ -1092,8 +1186,12 @@ export class Session{
             requestApproval: (request) => this._requestApproval(request),
             resolveAttachments: (messages) => this._resolveAttachments(
                 messages,
-                llm,
+                provider,
                 abortController.signal,
+            ),
+            ingestAttachments: (attachments, signal) => this._ingestAttachments(
+                attachments,
+                signal,
             ),
         };
 
@@ -1144,15 +1242,42 @@ export class Session{
         }
     }
 
+    /** 把 Provider 输出的媒体落盘为 AttachmentRef */
+    private async _ingestAttachments(
+        attachments: readonly PendingAttachment[],
+        signal: AbortSignal,
+    ): Promise<readonly IngestedAttachment[]>{
+        if (this._attachmentIngestor === undefined){
+            throw new SessionError(
+                SessionErrorType.InvalidRequest,
+                "Generated media requires an AttachmentFileManager",
+            );
+        }
+
+        const ingested: IngestedAttachment[] = [];
+        for (const attachment of attachments){
+            if (signal.aborted){
+                throw new SessionError(
+                    SessionErrorType.InvalidRequest,
+                    "Attachment ingestion was aborted",
+                );
+            }
+
+            const ref = await this._attachmentIngestor.ingest(attachment, { signal });
+            ingested.push({ attachment, ref });
+        }
+        return ingested;
+    }
+
     /** 解析本轮消息中的附件
      * @param messages 本轮发送给模型的消息（快照 + 待提交消息）
-     * @param llm 当前 LLMProvider
+     * @param provider 当前对话 Provider
      * @param signal 取消信号
      * @returns 内容指纹到 Provider 附件表示的映射；无附件时返回 undefined
      */
     private async _resolveAttachments(
         messages: readonly Message[],
-        llm: LLMProvider,
+        provider: ChatProvider,
         signal: AbortSignal,
     ): Promise<AttachmentWireMap | undefined>{
         const contentHashes = collectAttachmentHashes(messages);
@@ -1169,8 +1294,8 @@ export class Session{
             );
         }
 
-        const cloudFileManager = llm.cloudFileManager;
-        if (!llm.supportsAttachments || cloudFileManager === null){
+        const cloudFileManager = provider.cloudFileManager;
+        if (!provider.supportsAttachments || cloudFileManager === null){
             throw new SessionError(
                 SessionErrorType.InvalidRequest,
                 "The current LLM provider does not support attachments",
@@ -1262,11 +1387,11 @@ export class Session{
     /** 未显式指定模型时，由 Provider 选择默认模型
      * @note 只补齐 model；think / thinkingLv 未设置时保持 Provider 默认
      */
-    private async _ensureRuntimeModel(llm: LLMProvider): Promise<void>{
+    private async _ensureRuntimeModel(provider: ChatProvider): Promise<void>{
         const current = this._runtimeOptions.model;
         if (typeof current === "string" && current.length > 0) return;
 
-        const model = await llm.resolveDefaultModel();
+        const model = await provider.resolveDefaultModel();
         if (model !== undefined && model.length > 0){
             this._runtimeOptions = { ...this._runtimeOptions, model };
         }
@@ -1289,6 +1414,36 @@ export class Session{
                 // 监听器异常不能破坏 Session/Run 状态
             }
         }
+    }
+}
+
+/** 合并流式与最终媒体；final 结果覆盖同 sourceId 的流式片段 */
+function mergePendingAttachments(
+    attachments: readonly PendingAttachment[],
+): PendingAttachment[]{
+    const merged = new Map<string, PendingAttachment>();
+    let fallbackIndex = 0;
+
+    for (const attachment of attachments){
+        merged.set(pendingAttachmentKey(attachment, fallbackIndex++), attachment);
+    }
+
+    return [...merged.values()];
+}
+
+function pendingAttachmentKey(attachment: PendingAttachment, fallbackIndex: number): string{
+    if (attachment.sourceId !== undefined && attachment.sourceId.length > 0){
+        return `source:${attachment.sourceId}`;
+    }
+
+    switch (attachment.kind){
+        case "url":
+            return `url:${attachment.url}`;
+        case "remote-id":
+            return `remote-id:${attachment.id}`;
+        case "bytes":
+            // 没有 sourceId 时不能按大小/名称去重，否则同尺寸图片会被误合并
+            return `bytes:${fallbackIndex}`;
     }
 }
 

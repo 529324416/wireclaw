@@ -118,3 +118,20 @@ export function toBase64(bytes: Uint8Array): string{
 
     return btoa(binary);
 }
+
+/** 解码 base64（可选 data URL 前缀）
+ * @note 使用 atob；Node >= 20 与浏览器均可用。
+ */
+export function fromBase64(value: string): Uint8Array{
+    const comma = value.indexOf(",");
+    const payload = value.startsWith("data:") && comma >= 0
+        ? value.slice(comma + 1)
+        : value;
+
+    const binary = atob(payload);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index++){
+        bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
+}
