@@ -72,6 +72,22 @@ const session = createNewSession(provider);
 await session.run("Hello");
 ```
 
+Qwen (DashScope, OpenAI-compatible):
+
+```ts
+import { QwenChatProvider, createNewSession } from "wireclaw";
+
+const provider = new QwenChatProvider({
+  apiKey: process.env.DASHSCOPE_API_KEY!,
+  model: "qwen-plus",
+});
+
+const session = createNewSession(provider);
+await session.run("Hello");
+```
+
+Qwen `/models` does not expose input modalities. The reference client applies `applyQwenReferenceModelOverrides` from `wireclaw/client`; library hosts should call `provider.overwriteMany(...)` with their own capability data. Omni models accept text, images, audio, and video via the session attachment pipeline (audio/video are sent as data URIs). Image-generation models (`qwen-image-*`) are separate `GenerationCapability` providers, not chat models; use `QwenImageProvider` when you need direct generation.
+
 ## Attachments: local files on Node
 
 ```ts

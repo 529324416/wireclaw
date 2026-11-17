@@ -1,31 +1,44 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
 import { sanitizePathInput } from "./src/base";
-import { detectImageMimeType } from "./src/file";
+
 import { LocalFileHost, readLocalSourcePath } from "./src/file/local";
 import {
     DEEPSEEK_DEFAULT_BASE_URL,
     DeepSeekProvider,
     MiniMaxChatProvider,
     OllamaProvider,
+    QWEN_DEFAULT_BASE_URL,
+    QWEN_DEFAULT_CHAT_MODEL,
+    QwenChatProvider,
 } from "./src/platform/index";
-import { createMcpProvider, LocalToolProvider } from "./src/client";
+import {
+    applyQwenReferenceModelOverrides,
+    createMcpProvider,
+    LocalToolProvider,
+} from "./src/client";
 import {
     AttachmentFileManager,
     DEFAULT_SESSION_PERMISSION,
+    detectMediaMimeType,
+    extensionForMediaMimeType,
     HOST_TOOL_DEFINITIONS,
+    mediaModalityFromMimeType,
     RunStatus,
     Session,
     SessionHistory,
     SessionPermission,
     SessionSerializer,
     ToolRegistry,
+    validateMediaInputLimit,
 } from "./src/session/index";
 import type { ChatProvider } from "./src/session/protocol";
 import { SessionEventType } from "./src/session/type";
+import type { Message } from "./src/session/message";
 import type {
     SessionEvent,
     SessionRuntimeOptions,
@@ -40,7 +53,7 @@ import type {
  *   npx tsx client.ts
  *
  * 环境变量：
- *   WIRECLAW_PROVIDER      启动时使用的 Provider：ollama / deepseek / minimax，默认 ollama
+ *   WIRECLAW_PROVIDER      启动时使用的 Provider：ollama / deepseek / minimax / qwen，默认 ollama
  *   OLLAMA_BASE_URL    默认 http://127.0.0.1:11434
  *   OLLAMA_MODEL       不填时优先选择 qwen3.5 9b，否则选择第一个支持 completion 的非 embedding 模型
  *   DEEPSEEK_API_KEY   直接指定 DeepSeek API key（优先于文件）
@@ -51,18 +64,23 @@ import type {
  *   MINIMAX_API_KEY_FILE 默认 ./apikey-minimax-h3.txt
  *   MINIMAX_BASE_URL   默认 https://api.minimax.cn
  *   MINIMAX_MODEL      默认 MiniMax-M3.1-Flash
+ *   DASHSCOPE_API_KEY  直接指定 Qwen API key（优先于文件）
+ *   QWEN_API_KEY_FILE  默认 ./apikey-qwen.txt
+ *   QWEN_BASE_URL      默认 https://dashscope.aliyuncs.com/compatible-mode/v1
+ *   QWEN_MODEL         默认 qwen-plus
  *   WIRECLAW_MCP_URL      默认 http://127.0.0.1:5000/mcp
  *   WIRECLAW_MCP_ID       MCP 工具名前缀，默认 mcp
  *   WIRECLAW_MCP_DISABLE  设为 1 时不注册 MCP Provider
  *
  * 命令：
  *   /exit                                退出
- *   /provider [providerId]               查看/切换 LLM Provider（ollama / deepseek / minimax）
+ *   /provider [providerId]               查看/切换 LLM Provider（ollama / deepseek / minimax / qwen）
  *   /model <model-name>                  切换当前 Provider 的模型
  *   /list_models                         列出当前 Provider 的可用模型及能力
  *   /tools                               列出当前可用的工具（含 MCP）
  *   /permission [readonly|approval|full] 查看/切换会话权限等级
- *   /upload <image-path>                 追加一个图片附件（jpg/jpeg/png/webp/gif）
+ *   /upload <media-path>                 追加图片/音频/视频附件（按模型输入能力校验）
+ *   /attachments                         列出会话附件并导出为 file:// 本地链接
  *   /save_session [path]                 保存当前会话数据（默认 ./wireclaw-session.json）
  *   /restore_session [path]              读取会话数据并覆盖当前会话（会丢弃当前数据）
  */
@@ -73,7 +91,35 @@ const MCP_URL = process.env.WIRECLAW_MCP_URL ?? "http://127.0.0.1:5000/mcp";
 const MCP_ID = process.env.WIRECLAW_MCP_ID ?? "mcp";
 const MCP_DISABLED = process.env.WIRECLAW_MCP_DISABLE === "1";
 const FILES_DIR = process.env.WIRECLAW_FILES_DIR ?? "./.wireclaw-files";
-const SUPPORTED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif"]);
+/** 控制台无法直接渲染媒体；把 assistant 生成的媒体导出为可点击的本地文件链接 */
+const MEDIA_EXPORT_DIR = resolve(process.cwd(), FILES_DIR, "exports");
+const SUPPORTED_MEDIA_EXTENSIONS = new Set([
+    ".jpg", ".jpeg", ".png", ".webp", ".gif",
+    ".mp3", ".wav", ".aac", ".amr", ".3gp", ".3gpp", ".m4a",
+    ".mp4", ".avi", ".mkv", ".mov", ".flv", ".wmv", ".webm",
+]);
+
+const MEDIA_EXTENSION_MIME_TYPES = new Map<string, string>([
+    [".jpg", "image/jpeg"],
+    [".jpeg", "image/jpeg"],
+    [".png", "image/png"],
+    [".webp", "image/webp"],
+    [".gif", "image/gif"],
+    [".mp3", "audio/mpeg"],
+    [".wav", "audio/wav"],
+    [".aac", "audio/aac"],
+    [".amr", "audio/amr"],
+    [".3gp", "video/3gpp"],
+    [".3gpp", "video/3gpp"],
+    [".m4a", "audio/mp4"],
+    [".mp4", "video/mp4"],
+    [".avi", "video/x-msvideo"],
+    [".mkv", "video/x-matroska"],
+    [".mov", "video/quicktime"],
+    [".flv", "video/x-flv"],
+    [".wmv", "video/x-ms-wmv"],
+    [".webm", "video/webm"],
+]);
 
 const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL ?? DEEPSEEK_DEFAULT_BASE_URL;
 const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL ?? "deepseek-flash";
@@ -81,8 +127,11 @@ const DEEPSEEK_API_KEY_FILE = process.env.DEEPSEEK_API_KEY_FILE ?? "./apikey-ds.
 const MINIMAX_BASE_URL = process.env.MINIMAX_BASE_URL ?? "https://api.minimax.cn";
 const MINIMAX_MODEL = process.env.MINIMAX_MODEL ?? "MiniMax-M3.1-Flash";
 const MINIMAX_API_KEY_FILE = process.env.MINIMAX_API_KEY_FILE ?? "./apikey-minimax-h3.txt";
+const QWEN_BASE_URL = process.env.QWEN_BASE_URL ?? QWEN_DEFAULT_BASE_URL;
+const QWEN_MODEL = process.env.QWEN_MODEL ?? QWEN_DEFAULT_CHAT_MODEL;
+const QWEN_API_KEY_FILE = process.env.QWEN_API_KEY_FILE ?? "./apikey-qwen.txt";
 
-const PROVIDER_IDS = ["ollama", "deepseek", "minimax"] as const;
+const PROVIDER_IDS = ["ollama", "deepseek", "minimax", "qwen"] as const;
 type ProviderId = (typeof PROVIDER_IDS)[number];
 
 type ProviderRuntime = {
@@ -131,6 +180,65 @@ function errorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
 }
 
+type ExportedMedia = {
+    path: string;
+    url: string;
+    name: string;
+    mimeType?: string;
+    size: number;
+};
+
+/** 收集会话历史中的唯一附件指纹 */
+function collectAttachmentHashes(messages: readonly Message[]): string[] {
+    const hashes = new Set<string>();
+    for (const message of messages) {
+        if (typeof message.content === "string") continue;
+        for (const part of message.content) {
+            if (part.type === "attachment") hashes.add(part.attachment.contentHash);
+        }
+    }
+    return [...hashes];
+}
+
+/** 把附件从 IFileHost 导出为带扩展名的本地文件，供控制台点击打开 */
+async function exportAttachmentFile(
+    manager: AttachmentFileManager,
+    contentHash: string,
+): Promise<ExportedMedia | undefined> {
+    const file = await manager.get(contentHash);
+    if (file === undefined) return undefined;
+
+    const rawName = basename(file.name.length > 0 ? file.name : `attachment-${contentHash.slice(0, 12)}`);
+    const rawExtension = extname(rawName);
+    const stem = (rawExtension.length > 0
+        ? rawName.slice(0, -rawExtension.length)
+        : rawName)
+        .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_")
+        .trim()
+        .slice(0, 64) || "attachment";
+    const suffix = (rawExtension.length > 0
+        ? rawExtension.slice(1)
+        : extensionForMediaMimeType(file.mimeType ?? "") ?? "bin")
+        .replace(/[^A-Za-z0-9]+/g, "") || "bin";
+    const fileName = `${contentHash.slice(0, 12)}-${stem}.${suffix}`;
+    const target = resolve(MEDIA_EXPORT_DIR, fileName);
+
+    await mkdir(MEDIA_EXPORT_DIR, { recursive: true });
+    await writeFile(target, file.content);
+
+    return {
+        path: target,
+        url: pathToFileURL(target).href,
+        name: file.name.length > 0 ? file.name : fileName,
+        mimeType: file.mimeType,
+        size: file.size,
+    };
+}
+
+function formatExportedMedia(media: ExportedMedia): string {
+    return `${media.name} (${media.mimeType ?? "unknown"}, ${media.size} bytes)\n  ${media.url}`;
+}
+
 function parsePermission(value: string): SessionPermission | null {
     switch (value) {
         case SessionPermission.ReadOnly:
@@ -173,6 +281,9 @@ function normalizeProviderId(value: string): ProviderId | null {
         case "minimax":
         case "mini":
             return "minimax";
+        case "qwen":
+        case "dashscope":
+            return "qwen";
         default:
             return null;
     }
@@ -183,6 +294,7 @@ function providerLabel(id: ProviderId): string {
         case "ollama": return "Ollama";
         case "deepseek": return "DeepSeek";
         case "minimax": return "MiniMax";
+        case "qwen": return "Qwen";
     }
 }
 
@@ -232,6 +344,29 @@ async function readMiniMaxApiKey(): Promise<string> {
     return key;
 }
 
+async function readQwenApiKey(): Promise<string> {
+    const configured = process.env.DASHSCOPE_API_KEY?.trim() ?? process.env.QWEN_API_KEY?.trim();
+    if (configured !== undefined && configured.length > 0) return configured;
+
+    const keyPath = resolve(process.cwd(), sanitizePathInput(QWEN_API_KEY_FILE));
+    let raw: string;
+    try {
+        raw = await readFile(keyPath, "utf8");
+    } catch {
+        throw new Error(`Qwen API key file is not readable: ${keyPath}`);
+    }
+
+    let key = raw.replace(/^\uFEFF/, "").trim();
+    const assignment = /^(?:DASHSCOPE_API_KEY|QWEN_API_KEY)\s*=\s*(.+)$/m.exec(key);
+    if (assignment !== null) key = assignment[1]?.trim() ?? "";
+    key = key.replace(/^["']|["']$/g, "").trim();
+
+    if (key.length === 0) {
+        throw new Error(`Qwen API key file is empty: ${keyPath}`);
+    }
+    return key;
+}
+
 async function createProvider(id: ProviderId): Promise<ProviderRuntime> {
     switch (id) {
         case "ollama": {
@@ -274,6 +409,23 @@ async function createProvider(id: ProviderId): Promise<ProviderRuntime> {
                 endpoint: MINIMAX_BASE_URL,
                 provider,
                 model: MINIMAX_MODEL,
+            };
+        }
+
+        case "qwen": {
+            const apiKey = await readQwenApiKey();
+            const provider = new QwenChatProvider({
+                apiKey,
+                baseUrl: QWEN_BASE_URL,
+                model: QWEN_MODEL,
+            });
+            applyQwenReferenceModelOverrides(provider);
+            return {
+                id,
+                label: providerLabel(id),
+                endpoint: QWEN_BASE_URL,
+                provider,
+                model: QWEN_MODEL,
             };
         }
     }
@@ -479,13 +631,25 @@ async function main(): Promise<void> {
                 }
                 break;
 
-            case SessionEventType.ASSISTANT_ATTACHMENT:
+            case SessionEventType.ASSISTANT_ATTACHMENT: {
                 process.stdout.write(
                     `\n[attachment] ${event.name ?? event.attachment.contentHash}`
                     + (event.mimeType !== undefined ? ` (${event.mimeType})` : "")
                     + "\n",
                 );
+                // 控制台不能直接渲染图片/视频；导出到本地并打印可点击的 file:// 链接
+                void exportAttachmentFile(attachmentManager, event.attachment.contentHash)
+                    .then((media) => {
+                        if (media === undefined) return;
+                        process.stdout.write(`  ${media.url}\n`);
+                    })
+                    .catch((error: unknown) => {
+                        process.stderr.write(
+                            `[attachment] failed to export: ${errorMessage(error)}\n`,
+                        );
+                    });
                 break;
+            }
 
             case SessionEventType.TOOL_CALL_START:
                 process.stdout.write(`\n[tool] ${event.call.name} ${shortJson(event.call.params)}\n`);
@@ -554,7 +718,7 @@ async function main(): Promise<void> {
     console.log(`files:      ${fileHost.rootDir}`);
     console.log(`mcp:        ${MCP_DISABLED ? "disabled" : MCP_URL}`);
     console.log("commands:   /exit, /provider [id], /model <name>, /list_models, /tools, /permission [readonly|approval|full]");
-    console.log("            /upload <image-path>, /save_session [path], /restore_session [path]");
+    console.log("            /upload <media-path>, /attachments, /save_session [path], /restore_session [path]");
     console.log("note:       /restore_session 会丢弃当前会话数据");
     console.log("");
 
@@ -582,6 +746,8 @@ async function main(): Promise<void> {
                     const requestedRaw = args[0]?.trim() ?? "";
                     if (requestedRaw.length === 0) {
                         console.log(`provider: ${currentProviderRuntime.id} (${currentProviderRuntime.label})`);
+                        console.log(`  endpoint: ${currentProviderRuntime.endpoint}`);
+                        console.log(`  model:    ${currentModel}`);
                         for (const id of PROVIDER_IDS) {
                             const marks: string[] = [];
                             if (id === currentProviderRuntime.id) marks.push("current");
@@ -589,13 +755,13 @@ async function main(): Promise<void> {
                             const suffix = marks.length > 0 ? ` [${marks.join(", ")}]` : "";
                             console.log(`  - ${id} (${providerLabel(id)})${suffix}`);
                         }
-                        console.log("usage: /provider <ollama|deepseek|minimax>");
+                        console.log("usage: /provider <ollama|deepseek|minimax|qwen>");
                         continue;
                     }
 
                     const requested = normalizeProviderId(requestedRaw);
                     if (requested === null) {
-                        console.log(`usage: /provider <ollama|deepseek|minimax> (current: ${currentProviderRuntime.id})`);
+                        console.log(`usage: /provider <ollama|deepseek|minimax|qwen> (current: ${currentProviderRuntime.id})`);
                         continue;
                     }
                     if (session.isBusy) {
@@ -626,6 +792,26 @@ async function main(): Promise<void> {
                     if (modelName.length === 0) {
                         console.log(`usage: /model <model-name> (current: ${currentModel})`);
                     } else {
+                        const modelProvider = currentProviderRuntime.provider.modelProvider;
+                        let knownModels = modelProvider?.availableModels;
+                        if (modelProvider !== null && knownModels === null) {
+                            try {
+                                knownModels = await modelProvider?.initModels();
+                            } catch (error) {
+                                console.log(`[model] capability check skipped: ${errorMessage(error)}`);
+                            }
+                        }
+                        const modelInfo = knownModels?.find(
+                            (item) => item.id === modelName || item.name === modelName,
+                        );
+                        if (modelInfo !== undefined && !modelInfo.supportCompletion) {
+                            const kind = modelInfo.capabilities?.generate?.image === true
+                                ? "an image generation model"
+                                : "a non-chat model";
+                            console.log(`[model] "${modelName}" is ${kind}, not a chat model`);
+                            continue;
+                        }
+
                         try {
                             session.switchModel(modelName);
                             currentModel = modelName;
@@ -655,6 +841,12 @@ async function main(): Promise<void> {
                             if (item.supportThink) marks.push("thinking");
                             if (item.isVisionModel) marks.push("vision");
                             if (item.isEmbeddingModel) marks.push("embedding");
+                            for (const modality of item.capabilities?.chat?.output ?? []) {
+                                if (modality !== "text") marks.push(modality);
+                            }
+                            if (item.capabilities?.generate?.image === true) marks.push("image");
+                            if (item.capabilities?.generate?.audio === true) marks.push("audio");
+                            if (item.capabilities?.generate?.video === true) marks.push("video");
                             const suffix = marks.length > 0 ? ` [${marks.join(", ")}]` : "";
                             console.log(`  ${String(index + 1).padStart(2)}. ${item.name}${suffix}`);
                         }
@@ -708,37 +900,67 @@ async function main(): Promise<void> {
 
                     const rawPath = sanitizePathInput(args.join(" "));
                     if (rawPath.length === 0) {
-                        console.log("usage: /upload <image-path>");
+                        console.log("usage: /upload <media-path>");
                         continue;
                     }
 
                     const target = resolve(process.cwd(), rawPath);
                     const extension = extname(target).toLowerCase();
-                    if (!SUPPORTED_IMAGE_EXTENSIONS.has(extension)) {
-                        console.log(`[upload] unsupported image extension: ${extension || "(none)"}; supported: ${[...SUPPORTED_IMAGE_EXTENSIONS].join(", ")}`);
+                    if (!SUPPORTED_MEDIA_EXTENSIONS.has(extension)) {
+                        console.log(
+                            `[upload] unsupported media extension: ${extension || "(none)"}; `
+                            + `supported: ${[...SUPPORTED_MEDIA_EXTENSIONS].join(", ")}`,
+                        );
                         continue;
                     }
 
                     try {
+                        const bytes = new Uint8Array(await readFile(target));
+                        const mimeType = detectMediaMimeType(bytes)
+                            ?? MEDIA_EXTENSION_MIME_TYPES.get(extension);
+                        if (mimeType === undefined) {
+                            console.log("[upload] file content is not a supported media type");
+                            continue;
+                        }
+
+                        const modality = mediaModalityFromMimeType(mimeType);
+                        if (modality === undefined) {
+                            console.log(`[upload] unsupported media MIME type: ${mimeType}`);
+                            continue;
+                        }
+
                         const modelProvider = currentProviderRuntime.provider.modelProvider;
                         if (modelProvider !== null) {
                             try {
                                 const models = modelProvider.availableModels
                                     ?? await modelProvider.initModels();
-                                const modelInfo = models.find(item => item.id === currentModel || item.name === currentModel);
-                                if (modelInfo !== undefined && !modelInfo.isVisionModel) {
-                                    console.log(`[upload] note: model "${currentModel}" is not marked as vision; switch model before sending`);
+                                const modelInfo = models.find(
+                                    item => item.id === currentModel || item.name === currentModel,
+                                );
+                                if (modelInfo !== undefined) {
+                                    const input = modelInfo.capabilities?.chat?.input;
+                                    if (input !== undefined && !input.includes(modality)) {
+                                        console.log(
+                                            `[upload] model "${currentModel}" does not support ${modality} input`,
+                                        );
+                                        continue;
+                                    }
+
+                                    const limit = modelInfo.limits?.input?.[modality];
+                                    const problems = validateMediaInputLimit({
+                                        mimeType,
+                                        size: bytes.byteLength,
+                                    }, limit);
+                                    if (problems.length > 0) {
+                                        console.log(
+                                            `[upload] ${modality} rejected: ${problems.join("; ")}`,
+                                        );
+                                        continue;
+                                    }
                                 }
                             } catch (error) {
                                 console.log(`[upload] model capability check skipped: ${errorMessage(error)}`);
                             }
-                        }
-
-                        const bytes = new Uint8Array(await readFile(target));
-                        const mimeType = detectImageMimeType(bytes);
-                        if (mimeType === undefined) {
-                            console.log("[upload] file content is not a supported image");
-                            continue;
                         }
 
                         const file = await attachmentManager.put(
@@ -755,6 +977,35 @@ async function main(): Promise<void> {
                         console.log(`[upload] pending attachments: ${pendingAttachments.length}`);
                     } catch (error) {
                         console.error(`[upload] ${errorMessage(error)}`);
+                    }
+                    continue;
+                }
+
+                if (command === "attachments" || command === "media") {
+                    const history = session.history;
+                    if (history === undefined) {
+                        console.log("[attachments] no active session");
+                        continue;
+                    }
+
+                    const hashes = collectAttachmentHashes(history.messages);
+                    if (hashes.length === 0) {
+                        console.log("[attachments] no attachments in the current session");
+                        continue;
+                    }
+
+                    console.log(`attachments (${hashes.length}):`);
+                    for (const [index, contentHash] of hashes.entries()) {
+                        try {
+                            const media = await exportAttachmentFile(attachmentManager, contentHash);
+                            if (media === undefined) {
+                                console.log(`  ${index + 1}. ${contentHash} (missing in attachment store)`);
+                                continue;
+                            }
+                            console.log(`  ${index + 1}. ${formatExportedMedia(media)}`);
+                        } catch (error) {
+                            console.error(`  ${index + 1}. ${contentHash}: ${errorMessage(error)}`);
+                        }
                     }
                     continue;
                 }

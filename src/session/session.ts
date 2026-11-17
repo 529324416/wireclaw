@@ -2,11 +2,23 @@ import { uniqueId } from "../base";
 import { SessionError, SessionErrorType, ToolError, ToolErrorType } from "./error";
 import type { AttachmentFileManager } from "./attachment-manager";
 import { AttachmentIngestor } from "./attachment-ingestor";
+import { isContentHash } from "./attachment";
+import {
+    detectMediaMimeType,
+    mediaModalityFromMimeType,
+    validateMediaInputLimit,
+} from "./media";
 import type { PendingAttachment } from "./media";
-import { AssistantMessage, ToolMessage, tool, user } from "./message";
+import { AssistantMessage, ToolMessage, UserMessage, tool, user } from "./message";
 import type { Message } from "./message";
 import { isChatProvider } from "./protocol";
-import type { AIProvider, ChatProvider } from "./protocol";
+import type {
+    AIProvider,
+    ChatProvider,
+    ModelCapabilities,
+    ModelInfo,
+    ModelModality,
+} from "./protocol";
 import {
     ChatRoleAssistant,
     SessionPermission,
@@ -35,6 +47,8 @@ import type { ToolRegistry } from "./tool";
 import {
     ASK_USER_TOOL_NAME,
     HOST_TOOL_DEFINITIONS,
+    VIEW_MEDIA_TOOL_DEFINITION,
+    VIEW_MEDIA_TOOL_NAME,
     formatUserInputResult,
     parseUserInputRequest,
     validateUserInputResult,
@@ -430,11 +444,22 @@ export type RunContext = {
     /** 是否启用 host 内置工具（ask_user） */
     enableUserInput: boolean;
 
+    /** 是否允许模型调用 host__view_media 回看 assistant 历史媒体 */
+    enableViewMedia: boolean;
+
+    /** 当前模型可接收的媒体模态；用于把 tool 媒体转换为 user 消息 */
+    viewableModalities: readonly ModelModality[];
+
     /** 请求人工输入；返回用户回答 */
     requestUserInput: (request: UserInputRequest, call: ToolCall) => Promise<UserInputResult>;
 
     /** 请求人工审批；返回 abort 表示运行已取消 */
     requestApproval: (request: ToolApprovalRequest) => Promise<ToolApprovalResult>;
+
+    /** 把历史消息转换为本轮实际发送给 Provider 的副本
+     * @note assistant 媒体统一写 [media:<contentHash>] 标记；当前轮的 tool 媒体转成 synthetic user 消息
+     */
+    prepareMessages: (messages: readonly Message[]) => Promise<readonly Message[]>;
 
     /** 解析本轮消息中的附件；无附件时返回 undefined
      * @note 由 Session 通过 IFileHost 和 CloudFileManager 实现，RunEngine 不感知附件细节
@@ -489,8 +514,9 @@ export class RunEngine{
             streamedAttachments.push(attachment);
         };
 
-        // 附件解析必须发生在 Adapter 转换之前；Adapter 本身不访问 IFileHost
-        const messages = this._messages(ctx);
+        // 附件解析必须发生在 Adapter 转换之前；Adapter 本身不访问 IFileHost。
+        // prepareMessages 负责按回放策略裁剪历史媒体，再只解析真正会发送的附件。
+        const messages = await ctx.prepareMessages(this._messages(ctx));
         const attachmentRefs = await ctx.resolveAttachments(messages);
 
         emit({ type: SessionEventType.ASSISTANT_START });
@@ -618,8 +644,9 @@ export class RunEngine{
             : await ctx.tools.listTools(ctx.signal);
 
         // host 工具本身依赖工具调用能力；不支持工具的 Provider 保持纯对话
-        if (ctx.enableUserInput && ctx.provider.supportsTools){
-            tools.push(...HOST_TOOL_DEFINITIONS);
+        if (ctx.provider.supportsTools){
+            if (ctx.enableUserInput) tools.push(...HOST_TOOL_DEFINITIONS);
+            if (ctx.enableViewMedia) tools.push(VIEW_MEDIA_TOOL_DEFINITION);
         }
 
         if (tools.length > 0 && !ctx.provider.supportsTools){
@@ -753,6 +780,11 @@ export class RunEngine{
             return await this._askUser(ctx, call);
         }
 
+        // host 内置工具：回看当前会话中 assistant 生成过的媒体
+        if (ctx.enableViewMedia && call.name === VIEW_MEDIA_TOOL_NAME){
+            return await this._viewMedia(ctx, call);
+        }
+
         if (toolkit === undefined){
             throw new SessionError(
                 SessionErrorType.MissingTools,
@@ -842,6 +874,54 @@ export class RunEngine{
             structuredContent: {
                 requestId: parsed.request.id,
                 answers: result.answers,
+            },
+        };
+    }
+
+    /** 处理 host__view_media：把 assistant 历史媒体重新作为工具结果返回
+     * @note 只允许当前会话 assistant 消息中出现过的 contentHash
+     */
+    private async _viewMedia(ctx: RunContext, call: ToolCall): Promise<ToolCallResult>{
+        const startedAt = performance.now();
+        const rawHash = call.params.contentHash;
+        if (typeof rawHash !== "string" || !isContentHash(rawHash)){
+            return toolErrorResult(new ToolError(
+                ToolErrorType.InvalidParams,
+                false,
+                "Invalid view_media parameters: contentHash must be a 64-character lowercase hex string",
+            ));
+        }
+
+        const messages = [...ctx.snapshot, ...ctx.run.pendingMessages];
+        const allowed = messages.some((message) => {
+            if (!(message instanceof AssistantMessage)) return false;
+            if (typeof message.content === "string") return false;
+            return message.content.some(
+                (part) => part.type === "attachment"
+                    && part.attachment.contentHash === rawHash,
+            );
+        });
+
+        if (!allowed){
+            return toolErrorResult(new ToolError(
+                ToolErrorType.InvalidParams,
+                false,
+                `Media ${rawHash} is not an assistant-generated attachment in this session`,
+            ));
+        }
+
+        const duration = Math.max(0, Math.round(performance.now() - startedAt));
+        return {
+            content: [
+                { type: "text", text: `Assistant media ${rawHash} is attached below.` },
+                { type: "attachment", attachment: { contentHash: rawHash } },
+            ],
+            status: {
+                isSuccess: true,
+                duration,
+            },
+            structuredContent: {
+                contentHash: rawHash,
             },
         };
     }
@@ -1157,6 +1237,38 @@ export class Session{
         const history = this._currentSession;
         const provider = this._provider;
         await this._ensureRuntimeModel(provider);
+
+        // 模型能力只读取已加载的模型列表，不主动发起网络请求；失败时退化为 Provider 级判断
+        let modelInfo: ModelInfo | undefined;
+        try{
+            modelInfo = await provider.resolveModelInfo(this._runtimeOptions.model);
+        }catch{
+            modelInfo = undefined;
+        }
+
+        let modelCapabilities: ModelCapabilities | undefined = modelInfo?.capabilities;
+        if (modelCapabilities === undefined){
+            try{
+                modelCapabilities = await provider.resolveModelCapabilities(this._runtimeOptions.model);
+            }catch{
+                modelCapabilities = undefined;
+            }
+        }
+
+        // 工具回看条件：模型既能接收媒体，又能产出媒体，且 Provider 支持工具调用。
+        // 文本 -> 媒体或多媒体 -> 文本 都不会注入 view_media。
+        const inputModalities = modelCapabilities?.chat?.input ?? [];
+        const outputModalities = modelCapabilities?.chat?.output ?? [];
+        const viewableModalities: ModelModality[] = inputModalities.filter(
+            (modality): modality is ModelModality => modality !== "text"
+                && modality !== "structured"
+                && outputModalities.includes(modality),
+        );
+        const enableViewMedia = provider.supportsTools
+            && modelCapabilities?.chat?.tools !== false
+            && viewableModalities.includes("image");
+        const snapshot = history.snapshot();
+
         const inputMessage = user(input);
 
         const run = new Run(history.id);
@@ -1170,7 +1282,7 @@ export class Session{
         this._emit({ type: SessionEventType.USER_INPUT, msg: input });
 
         const ctx: RunContext = {
-            snapshot: history.snapshot(),
+            snapshot,
             run,
             runtimeOptions: this._runtimeOptions,
             emit: (event) => this._emit(event),
@@ -1182,12 +1294,18 @@ export class Session{
             permission,
             toolProgressDelayMs,
             enableUserInput,
+            enableViewMedia,
+            viewableModalities,
             requestUserInput: (request, call) => this._requestUserInput(request, call),
             requestApproval: (request) => this._requestApproval(request),
+            prepareMessages: async (messages) =>
+                prepareProviderMessages(messages, snapshot.length, viewableModalities),
             resolveAttachments: (messages) => this._resolveAttachments(
                 messages,
                 provider,
                 abortController.signal,
+                modelCapabilities,
+                modelInfo,
             ),
             ingestAttachments: (attachments, signal) => this._ingestAttachments(
                 attachments,
@@ -1273,12 +1391,15 @@ export class Session{
      * @param messages 本轮发送给模型的消息（快照 + 待提交消息）
      * @param provider 当前对话 Provider
      * @param signal 取消信号
+     * @param capabilities 当前模型的模型级能力；undefined 表示模型能力未知
      * @returns 内容指纹到 Provider 附件表示的映射；无附件时返回 undefined
      */
     private async _resolveAttachments(
         messages: readonly Message[],
         provider: ChatProvider,
         signal: AbortSignal,
+        capabilities: ModelCapabilities | undefined,
+        modelInfo: ModelInfo | undefined,
     ): Promise<AttachmentWireMap | undefined>{
         const contentHashes = collectAttachmentHashes(messages);
         if (contentHashes.size === 0){
@@ -1295,12 +1416,16 @@ export class Session{
         }
 
         const cloudFileManager = provider.cloudFileManager;
-        if (!provider.supportsAttachments || cloudFileManager === null){
+        if (!provider.supportsAttachmentInput || cloudFileManager === null){
             throw new SessionError(
                 SessionErrorType.InvalidRequest,
                 "The current LLM provider does not support attachments",
             );
         }
+
+        const model = this._runtimeOptions.model;
+        const inputModalities = capabilities?.chat?.input;
+        const modalityCounts = new Map<ModelModality, number>();
 
         // 先构建新映射，成功后再替换；解析失败时不破坏上一轮的有效状态
         const attachmentRefs = new Map<string, RemoteFileRef>();
@@ -1320,6 +1445,46 @@ export class Session{
                     `Attachment file is missing or corrupted: ${contentHash}; `
                         + "the session data cannot be fully restored",
                 );
+            }
+
+            const mimeType = file.mimeType ?? detectMediaMimeType(file.content);
+            const modality = mediaModalityFromMimeType(mimeType);
+
+            // 模型列表已加载时按模型模态拒绝媒体输入；非媒体附件交由具体 Provider 判断
+            if (modality !== undefined){
+                if (inputModalities !== undefined && !inputModalities.includes(modality)){
+                    throw new SessionError(
+                        SessionErrorType.UnsupportedInput,
+                        `Model "${model ?? ""}" does not support ${modality} input`,
+                    );
+                }
+
+                const limit = modelInfo?.limits?.input?.[modality];
+                const problems = validateMediaInputLimit({
+                    mimeType,
+                    size: file.size,
+                }, limit);
+                if (problems.length > 0){
+                    const formatProblem = problems.some((problem) =>
+                        problem.startsWith("unsupported MIME type"));
+                    throw new SessionError(
+                        formatProblem
+                            ? SessionErrorType.UnsupportedMediaFormat
+                            : SessionErrorType.InputLimitExceeded,
+                        `Invalid ${modality} input "${file.name}": ${problems.join("; ")}`,
+                    );
+                }
+
+                if (limit?.maxCount !== undefined){
+                    const nextCount = (modalityCounts.get(modality) ?? 0) + 1;
+                    if (nextCount > limit.maxCount){
+                        throw new SessionError(
+                            SessionErrorType.InputLimitExceeded,
+                            `Too many ${modality} inputs: ${nextCount} (max ${limit.maxCount})`,
+                        );
+                    }
+                }
+                modalityCounts.set(modality, (modalityCounts.get(modality) ?? 0) + 1);
             }
 
             attachmentRefs.set(contentHash, await cloudFileManager.ensureFile(file, signal));
@@ -1501,6 +1666,117 @@ function abortedResult(call: ToolCall): ToolCallResult{
             `Tool call "${call.name}" was aborted`,
         ),
     );
+}
+
+/** 构造本轮发送给 Provider 的消息副本
+ *
+ * - assistant 附件统一替换为 `[media:<contentHash>]`，让模型知道可回看；
+ * - 当前轮的 tool 附件转成 synthetic user 消息（主流 chat 协议不接受 tool 媒体）；
+ * - 历史 tool 附件剥离，避免每轮重复上传/发送。
+ */
+function prepareProviderMessages(
+    messages: readonly Message[],
+    historyCount: number,
+    viewableModalities: readonly ModelModality[],
+): Message[]{
+    const result: Message[] = [];
+    let pendingMedia: string[] = [];
+    const canEgressToolMedia = viewableModalities.length > 0;
+
+    const flushToolMedia = (): void => {
+        if (pendingMedia.length === 0) return;
+
+        const hashes = [...new Set(pendingMedia)];
+        pendingMedia = [];
+        result.push(new UserMessage([
+            { type: "text", text: "Media returned by tool calls (attached below):" },
+            ...hashes.map((contentHash) => ({
+                type: "attachment" as const,
+                attachment: { contentHash },
+            })),
+        ]));
+    };
+
+    for (const [index, message] of messages.entries()){
+        const isPending = index >= historyCount;
+
+        if (message instanceof ToolMessage){
+            const prepared = prepareToolMessage(message, isPending && canEgressToolMedia);
+            result.push(prepared.message);
+            pendingMedia.push(...prepared.media);
+
+            const next = messages[index + 1];
+            if (!(next instanceof ToolMessage)) flushToolMedia();
+            continue;
+        }
+
+        flushToolMedia();
+        result.push(message instanceof AssistantMessage
+            ? prepareAssistantMessage(message)
+            : message);
+    }
+
+    flushToolMedia();
+    return result;
+}
+
+/** assistant 媒体在当前架构下只可能来自会话级媒体产出；统一写回 contentHash 标记 */
+function prepareAssistantMessage(message: AssistantMessage): AssistantMessage{
+    if (typeof message.content === "string") return message;
+    if (!message.content.some((part) => part.type === "attachment")) return message;
+
+    const parts: ContentPart[] = message.content.map((part) => part.type === "text"
+        ? part
+        : { type: "text" as const, text: `[media:${part.attachment.contentHash}]` });
+
+    return new AssistantMessage(
+        parts.length === 0 ? "" : parts,
+        message.isCompressed,
+        message.thinking,
+        message.usage,
+        [...message.toolCalls],
+        message.stopReason,
+        message.failureReason,
+    );
+}
+
+/** 当前轮的 tool 媒体交给 synthetic user 消息；历史 tool 媒体直接剥离 */
+function prepareToolMessage(
+    message: ToolMessage,
+    allowEgress: boolean,
+): { message: ToolMessage; media: string[] }{
+    if (typeof message.content === "string"){
+        return { message, media: [] };
+    }
+    if (!message.content.some((part) => part.type === "attachment")){
+        return { message, media: [] };
+    }
+
+    const parts: ContentPart[] = [];
+    const media: string[] = [];
+
+    for (const part of message.content){
+        if (part.type === "text"){
+            parts.push(part);
+            continue;
+        }
+        if (allowEgress){
+            media.push(part.attachment.contentHash);
+        }else{
+            parts.push({ type: "text", text: "[tool media omitted]" });
+        }
+    }
+
+    return {
+        message: new ToolMessage(
+            parts.length === 0 ? "" : parts,
+            message.toolName,
+            message.callId,
+            message.details,
+            message.isCompressed,
+        ),
+        media,
+    };
 }
 
 /** 收集消息内容中的唯一附件内容指纹 */

@@ -10,6 +10,9 @@ export const SessionErrorType = {
     MissingProvider: 'Missing provider',
     MissingTools: 'Missing tools',
     ModelUnavailable: 'Model is unavailable',
+    UnsupportedInput: 'Unsupported model input',
+    InputLimitExceeded: 'Model input limit exceeded',
+    UnsupportedMediaFormat: 'Unsupported media format',
     NetworkError: 'Network error',
     ProviderError: 'Provider error',
     Unknown: 'Unknown error'

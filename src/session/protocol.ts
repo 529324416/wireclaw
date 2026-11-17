@@ -1,5 +1,6 @@
 /* Session模块协议定义 */
 
+import { InvalidParameterError } from "../base";
 import type { AttachmentFile } from "./attachment";
 import { handleSessionError } from "./error";
 import type { GeneratedMedia } from "./media";
@@ -73,34 +74,85 @@ export abstract class ProtocolAdapter{
 /** 模型输入/输出模态 */
 export type ModelModality = "text" | "image" | "audio" | "video";
 
+/** 模型输入类型：媒体/文本 + 结构化状态 */
+export type ModelInputType = ModelModality | "structured";
+
+/** 模型输出类型：媒体/文本 + 结构化结果/决策/向量 */
+export type ModelOutputType =
+    | ModelModality
+    | "structured"
+    | "decision"
+    | "embedding";
+
+/** 统一的输入/输出能力 */
+export type ModelIoCapabilities = {
+    input: readonly ModelInputType[];
+    output: readonly ModelOutputType[];
+};
+
+/** 单模态输入限制；由具体模型声明，Provider 只提供平台默认值 */
+export type MediaInputLimit = {
+    /** 原始字节上限 */
+    maxBytes?: number;
+
+    /** 编码后大小上限（例如 base64 字符串） */
+    maxEncodedBytes?: number;
+
+    /** 时长上限（秒） */
+    maxDurationSeconds?: number;
+
+    /** 允许的 MIME 白名单 */
+    mimeTypes?: readonly string[];
+
+    /** 单次请求允许的数量 */
+    maxCount?: number;
+
+    /** 允许的传输形式 */
+    allowedTransports?: readonly ("inline" | "url" | "remote-id")[];
+};
+
+/** 模型级限制 */
+export type ModelLimits = {
+    maxContextTokens?: number;
+    maxOutputTokens?: number;
+    input?: Partial<Record<ModelInputType, MediaInputLimit>>;
+    output?: Partial<Record<ModelOutputType, MediaInputLimit>>;
+};
+
 /** 对话模型的模型级能力 */
-export type ChatModelCapabilities = {
-    input?: readonly ModelModality[];
-    output?: readonly ModelModality[];
+export type ChatModelCapabilities = ModelIoCapabilities & {
     streaming?: boolean;
     tools?: boolean;
+    thinking?: boolean;
     context?: boolean;
 };
 
-/** 生成模型（生图/生语音/生视频）的模型级能力 */
-export type GenerationModelCapabilities = {
+/** 生成模型（生图/生语音/生视频）的模型级能力
+ * @note image/audio/video 是 output 数组的派生快捷标记，由 normalizeModelInfo 统一填充
+ */
+export type GenerationModelCapabilities = ModelIoCapabilities & {
+    async?: boolean;
+    context?: boolean;
     image?: boolean;
     audio?: boolean;
     video?: boolean;
-    async?: boolean;
-    context?: boolean;
 };
 
 /** 决策模型的模型级能力 */
-export type DecisionModelCapabilities = {
+export type DecisionModelCapabilities = ModelIoCapabilities & {
+    options?: boolean;
     structuredOutput?: boolean;
 };
+
+/** 嵌入模型的模型级能力 */
+export type EmbeddingModelCapabilities = ModelIoCapabilities;
 
 /** 按模型声明的能力；Provider 只是模型容器 */
 export type ModelCapabilities = {
     chat?: ChatModelCapabilities;
     generate?: GenerationModelCapabilities;
     decide?: DecisionModelCapabilities;
+    embed?: EmbeddingModelCapabilities;
 };
 
 /** 模型信息 */
@@ -139,6 +191,9 @@ export type ModelInfo = {
     /** 模型级能力；未声明时由调用方按传统字段推断 */
     capabilities?: ModelCapabilities;
 
+    /** 模型级输入/输出限制 */
+    limits?: ModelLimits;
+
     /** 模型版本号 */
     version?: string;
 
@@ -151,6 +206,122 @@ export type ModelBrief = {
     id: string;
     name: string;
 };
+
+const MODEL_INPUT_TYPES: readonly ModelInputType[] = [
+    "text", "image", "audio", "video", "structured",
+];
+
+/** 把平台返回的字符串模态过滤成合法的模型输入类型；空值时回退到 text */
+export function normalizeInputTypes(values: readonly string[]): ModelInputType[]{
+    const result: ModelInputType[] = [];
+    for (const value of values){
+        if (MODEL_INPUT_TYPES.includes(value as ModelInputType)
+            && !result.includes(value as ModelInputType)){
+            result.push(value as ModelInputType);
+        }
+    }
+    return result.length > 0 ? result : ["text"];
+}
+
+/** 归一化模型能力
+ *
+ * `capabilities` 是唯一事实源；ModelInfo 上的 bool 字段只是便捷派生值。
+ * 旧 Provider 只提供 bool 时，会反向合成对应的 capabilities。
+ */
+export function normalizeModelInfo(info: ModelInfo): ModelInfo{
+    const capabilities = normalizeCapabilities(info);
+    const chat = capabilities?.chat;
+    const embed = capabilities?.embed;
+
+    return {
+        ...info,
+        supportCompletion: chat !== undefined,
+        supportToolCall: chat?.tools === true,
+        supportThink: chat?.thinking === true || (info.thinkingLevels?.length ?? 0) > 0,
+        isVisionModel: chat?.input.includes("image") === true,
+        isEmbeddingModel: embed !== undefined,
+        capabilities,
+    };
+}
+
+function normalizeCapabilities(info: ModelInfo): ModelCapabilities | undefined{
+    const source = info.capabilities;
+
+    if (source === undefined){
+        if (info.isEmbeddingModel){
+            return { embed: { input: ["text"], output: ["embedding"] } };
+        }
+        if (!info.supportCompletion) return undefined;
+
+        return {
+            chat: {
+                input: info.isVisionModel ? ["text", "image"] : ["text"],
+                output: ["text"],
+                streaming: true,
+                tools: info.supportToolCall,
+                thinking: info.supportThink,
+            },
+        };
+    }
+
+    const result: ModelCapabilities = { ...source };
+
+    if (source.chat !== undefined){
+        result.chat = {
+            ...source.chat,
+            input: (source.chat.input?.length ?? 0) > 0 ? source.chat.input : ["text"],
+            output: (source.chat.output?.length ?? 0) > 0 ? source.chat.output : ["text"],
+            tools: source.chat.tools ?? false,
+            thinking: source.chat.thinking ?? (info.thinkingLevels?.length ?? 0) > 0,
+        };
+    }
+
+    if (source.generate !== undefined){
+        const output = (source.generate.output?.length ?? 0) > 0
+            ? source.generate.output
+            : derivedGenerationOutput(source.generate);
+        result.generate = {
+            ...source.generate,
+            input: (source.generate.input?.length ?? 0) > 0 ? source.generate.input : ["text"],
+            output,
+            image: output.includes("image"),
+            audio: output.includes("audio"),
+            video: output.includes("video"),
+        };
+    }
+
+    if (source.decide !== undefined){
+        const output: readonly ModelOutputType[] = (source.decide.output?.length ?? 0) > 0
+            ? source.decide.output
+            : ["decision"];
+        result.decide = {
+            ...source.decide,
+            input: (source.decide.input?.length ?? 0) > 0 ? source.decide.input : ["structured"],
+            output,
+            structuredOutput: output.includes("structured"),
+        };
+    }
+
+    if (source.embed !== undefined){
+        result.embed = {
+            ...source.embed,
+            input: (source.embed.input?.length ?? 0) > 0 ? source.embed.input : ["text"],
+            output: (source.embed.output?.length ?? 0) > 0 ? source.embed.output : ["embedding"],
+        };
+    }
+
+    return result;
+}
+
+function derivedGenerationOutput(
+    capabilities: GenerationModelCapabilities,
+): ModelOutputType[]{
+    const output: ModelOutputType[] = ["text"];
+    if (capabilities.image === true) output.push("image");
+    if (capabilities.audio === true) output.push("audio");
+    if (capabilities.video === true) output.push("video");
+    return output;
+}
 
 /** 模型提供者
  * @note 默认不同的模型支持不同的参数而非根据平台来决定，比如Ollama的部分模型支持think参数而部分不支持，
@@ -171,6 +342,9 @@ export abstract class ModelProvider{
     private _fetchCount: number = 0;    // 记录拉取模型的次数
     private _failedCount: number = 0;    // 记录拉取模型失败的次数(主要用于决定UI端是否显示重试按钮)
 
+    /** 外部覆盖的模型能力；由宿主探测后注入 */
+    private readonly _overrides = new Map<string, Partial<ModelInfo>>();
+
     /** 是否正在拉取模型 */
     get isPending(): boolean{ return this._pendingModels !== null; }
     /** 是否已初始化模型 */
@@ -190,7 +364,26 @@ export abstract class ModelProvider{
     /** 拉取模型失败的次数 */
     get failedCount(): number{ return this._failedCount; }
 
-    
+    /** 覆盖单个模型的能力；模型不存在时会追加
+     * @note capabilities 会整体替换；ModelInfo 的 bool 字段由 normalizeModelInfo 派生
+     */
+    overwrite(modelId: string, info: Partial<ModelInfo>): void{
+        this._overrides.set(modelId, { ...info, id: modelId });
+        if (this._availableModels !== null){
+            this._availableModels = this._applyOverrides(this._availableModels);
+        }
+    }
+
+    /** 批量覆盖模型能力 */
+    overwriteMany(entries: readonly { id: string; info: Partial<ModelInfo> }[]): void{
+        for (const entry of entries){
+            this._overrides.set(entry.id, { ...entry.info, id: entry.id });
+        }
+        if (this._availableModels !== null){
+            this._availableModels = this._applyOverrides(this._availableModels);
+        }
+    }
+
     /** 初始化模型/子类实现具体逻辑 */
     async initModels(onloaded?: (models: readonly ModelInfo[]) => void): Promise<readonly ModelInfo[]>{ 
 
@@ -212,9 +405,9 @@ export abstract class ModelProvider{
                 await this.validateNetwork();
                 this._fetchCount++;
                 const models = await this.fetchModels();
-                this._availableModels = models;
-                onloaded?.(models);
-                return models;
+                this._availableModels = this._applyOverrides(models);
+                onloaded?.(this._availableModels);
+                return this._availableModels;
             } catch (e) {
                 this._failedCount++;
                 throw e;
@@ -233,11 +426,56 @@ export abstract class ModelProvider{
 
     /** 异步拉取模型 */
     protected abstract fetchModels(): Promise<ModelInfo[]>;
+
+    /** 合并外部覆盖并归一化能力 */
+    private _applyOverrides(models: readonly ModelInfo[]): ModelInfo[]{
+        const result = models.map((model) => normalizeModelInfo(model));
+        const indexById = new Map(result.map((model, index) => [model.id, index]));
+
+        for (const [modelId, override] of this._overrides){
+            const index = indexById.get(modelId);
+            if (index !== undefined){
+                const base = result[index];
+                if (base === undefined) continue;
+                result[index] = normalizeModelInfo({
+                    ...base,
+                    ...override,
+                    id: modelId,
+                    name: override.name ?? base.name,
+                });
+                continue;
+            }
+
+            const fallback: ModelInfo = {
+                id: modelId,
+                name: modelId,
+                description: "",
+                size: 0,
+                supportCompletion: false,
+                supportToolCall: false,
+                supportThink: false,
+                isVisionModel: false,
+                isEmbeddingModel: false,
+            };
+            const added = normalizeModelInfo({
+                ...fallback,
+                ...override,
+                id: modelId,
+                name: override.name ?? modelId,
+            });
+            indexById.set(modelId, result.length);
+            result.push(added);
+        }
+
+        return result;
+    }
 }
 
 
-/** 云文件管理器，描述不同平台如何把本地附件转换为可发送的远端/内联表示
- * @note 实现负责远端缓存、存在性校验、上传与过期处理；Session 只调用 ensureFile
+/** 输入附件转换器，描述不同平台如何把本地附件转换为可发送的远端/内联表示
+ * @note 只服务于“输入附件”：实现负责远端缓存、存在性校验、上传与过期处理；
+ *       Session 只调用 ensureFile。输出媒体不经过这里，而由 AttachmentIngestor
+ *       在会话层落盘（协议层不依赖 AttachmentIngestor）。
  */
 export abstract class CloudFileManager{
 
@@ -369,11 +607,66 @@ export abstract class AIProvider{
     /** 该 Provider 是否支持工具调用。UI 可据此禁用相关功能 */
     get supportsTools(): boolean { return false; }
 
-    /** 当前 Provider 的云文件管理器；null 表示不支持附件 */
+    /** 当前 Provider 的输入附件转换器；null 表示不能接收会话附件 */
     get cloudFileManager(): CloudFileManager | null { return null; }
 
-    /** 该 Provider 是否具备附件处理能力；模型级能力由具体实现进一步约束 */
-    get supportsAttachments(): boolean { return this.cloudFileManager !== null; }
+    /** 该 Provider 是否具备输入附件能力（上传/内联）；模型级模态由 resolveModelCapabilities 约束 */
+    get supportsAttachmentInput(): boolean { return this.cloudFileManager !== null; }
+
+    /** 该 Provider 的 chat 是否可能返回媒体；默认不返回 */
+    get supportsMediaOutput(): boolean { return false; }
+
+    /** 覆盖单个模型能力；由宿主探测后注入
+     * @note 模型不存在时会追加到模型目录
+     */
+    overwrite(modelId: string, info: Partial<ModelInfo>): void{
+        const modelProvider = this.modelProvider;
+        if (modelProvider === null){
+            throw new InvalidParameterError(`${this.title} does not expose a model provider`);
+        }
+        modelProvider.overwrite(modelId, info);
+    }
+
+    /** 批量覆盖模型能力 */
+    overwriteMany(entries: readonly { id: string; info: Partial<ModelInfo> }[]): void{
+        const modelProvider = this.modelProvider;
+        if (modelProvider === null){
+            throw new InvalidParameterError(`${this.title} does not expose a model provider`);
+        }
+        modelProvider.overwriteMany(entries);
+    }
+
+    /** 解析指定模型的完整信息
+     * @note 只读取已加载的模型列表，不主动发起网络请求。
+     */
+    async resolveModelInfo(model: string | undefined): Promise<ModelInfo | undefined>{
+        const modelProvider = this.modelProvider;
+        if (modelProvider === null || model === undefined || model.length === 0) return undefined;
+
+        const models = modelProvider.availableModels;
+        if (models === null) return undefined;
+
+        return models.find((item) => item.id === model || item.name === model);
+    }
+
+    /** 解析指定模型的模型级能力
+     * @note 只读取已加载的模型列表，不主动发起网络请求；
+     *       模型未加载或未命中时返回 undefined，由调用方退化为 Provider 级判断。
+     */
+    async resolveModelCapabilities(model: string | undefined): Promise<ModelCapabilities | undefined>{
+        const info = await this.resolveModelInfo(model);
+        if (info === undefined) return undefined;
+        if (info.capabilities !== undefined) return info.capabilities;
+
+        return {
+            chat: {
+                input: info.isVisionModel ? ["text", "image"] : ["text"],
+                output: ["text"],
+                streaming: true,
+                tools: info.supportToolCall,
+            },
+        };
+    }
 
     /** 当前 Provider 实际实现的能力；由方法存在性推导，避免额外的布尔标志失配 */
     get capabilities(): readonly ProviderCapability[]{

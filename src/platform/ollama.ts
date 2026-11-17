@@ -1,5 +1,6 @@
 import { toBase64, uniqueId } from "../base";
 import { detectImageMimeType } from "../file";
+import { consumeChatStream } from "./shared/stream";
 import type { AttachmentFile } from "../session/attachment";
 import { SessionError, SessionErrorType } from "../session/error";
 import { AssistantMessage, ToolMessage } from "../session";
@@ -38,14 +39,6 @@ type OllamaShowResponse = {
     capabilities?: unknown[];
     details?: Record<string, unknown>;
 };
-
-function emptyUsage(): ChatUsage{
-    return {
-        promptTokens: 0,
-        completionTokens: 0,
-        totalTokens: 0,
-    };
-}
 
 function isRecord(value: unknown): value is Record<string, unknown>{
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -114,6 +107,17 @@ function contentToOllama(
     }
 
     return { text: pieces.join("\n"), images };
+}
+
+/** 非 user 消息只发送文本；附件片段由 Session 回放策略剥离 */
+function contentTextOnly(content: MessageContent): string{
+    if (typeof content === "string") return content;
+
+    const pieces: string[] = [];
+    for (const part of content){
+        if (part.type === "text") pieces.push(part.text);
+    }
+    return pieces.join("\n");
 }
 
 function parseUsage(record: Record<string, unknown>): ChatUsage | undefined{
@@ -190,23 +194,23 @@ export class OllamaProtocolAdapter extends ProtocolAdapter{
      * @note Ollama 的图片协议是 base64 inline；其他平台可能是 file_id / URL / data URL
      */
     toPayload(msg: Message, attachmentRefs?: AttachmentWireMap): OllamaMessage{
-        const { text, images } = contentToOllama(msg.content, attachmentRefs);
-
         switch (msg.role){
             case "system":
-                this._assertNoImages(msg.role, images);
-                return { role: "system", content: text };
+                return { role: "system", content: contentTextOnly(msg.content) };
 
             case "user": {
+                const { text, images } = contentToOllama(msg.content, attachmentRefs);
                 const payload: OllamaMessage = { role: "user", content: text };
                 if (images.length > 0) payload.images = images;
                 return payload;
             }
 
             case "assistant": {
-                this._assertNoImages(msg.role, images);
                 const assistant = msg as AssistantMessage;
-                const payload: OllamaMessage = { role: "assistant", content: text };
+                const payload: OllamaMessage = {
+                    role: "assistant",
+                    content: contentTextOnly(assistant.content),
+                };
                 if (assistant.thinking !== undefined){
                     payload.thinking = assistant.thinking;
                 }
@@ -223,11 +227,10 @@ export class OllamaProtocolAdapter extends ProtocolAdapter{
             }
 
             case "tool": {
-                this._assertNoImages(msg.role, images);
                 const tool = msg as ToolMessage;
                 return {
                     role: "tool",
-                    content: text,
+                    content: contentTextOnly(tool.content),
                     tool_name: tool.toolName,
                     tool_call_id: tool.callId,
                 };
@@ -239,15 +242,6 @@ export class OllamaProtocolAdapter extends ProtocolAdapter{
                     `Unsupported message role: ${msg.role}`,
                 );
         }
-    }
-
-    /** Ollama 只在 user 消息中接受 images；其他角色出现附件时显式失败 */
-    private _assertNoImages(role: string, images: readonly string[]): void{
-        if (images.length === 0) return;
-        throw new SessionError(
-            SessionErrorType.InvalidData,
-            `Ollama only supports images on user messages, got role "${role}"`,
-        );
     }
 
     /** 解析 Ollama 的完整响应 */
@@ -433,6 +427,13 @@ export class OllamaModelProvider extends ModelProvider{
         const supportCompletion = capabilities.length === 0
             ? true
             : capabilities.includes("completion");
+        const isEmbeddingModel = capabilities.includes("embedding");
+        const input = supportCompletion
+            ? [
+                "text" as const,
+                ...(capabilities.includes("vision") ? ["image" as const] : []),
+            ]
+            : [];
 
         return {
             id: modelId,
@@ -444,7 +445,20 @@ export class OllamaModelProvider extends ModelProvider{
             supportThink: capabilities.includes("thinking"),
             thinkingLevels: undefined,
             isVisionModel: capabilities.includes("vision"),
-            isEmbeddingModel: capabilities.includes("embedding") || name.toLowerCase().includes("embed"),
+            isEmbeddingModel,
+            capabilities: supportCompletion
+                ? {
+                    chat: {
+                        input,
+                        output: ["text"],
+                        streaming: true,
+                        tools: capabilities.includes("tools"),
+                        thinking: capabilities.includes("thinking"),
+                    },
+                }
+                : isEmbeddingModel
+                    ? { embed: { input: ["text"], output: ["embedding"] } }
+                    : undefined,
             version: stringField(record, "digest")?.slice(0, 12),
             extraInfo: {
                 modifiedAt: stringField(record, "modified_at"),
@@ -619,155 +633,18 @@ export class OllamaProvider extends AIProvider implements ChatCapability{
             );
         }
 
-        let content = "";
-        let thinking = "";
-        let usage = emptyUsage();
-        let stopReason: ChatStopReason | undefined;
-        let lastRaw: unknown;
-        const toolCalls = new Map<number, {
-            id?: string;
-            name?: string;
-            argumentsText: string;
-        }>();
+        const { message, raw } = await consumeChatStream(response, {
+            format: "ndjson",
+            label: "Ollama",
+            adapter: this._protocolAdapter,
+            turn,
+            invalidJsonMessage: "Ollama returned invalid NDJSON",
+            toolNameFallback: (index) => `tool_${index}`,
+            invalidToolArgumentsMessage: (index) =>
+                `Invalid Ollama tool arguments at index ${index}`,
+            streamErrorMessage: (message) => message ?? "Ollama stream error",
+        });
 
-        const consumeLine = (line: string): void => {
-            const trimmed = line.trim();
-            if (trimmed.length === 0) return;
-
-            let raw: unknown;
-            try{
-                raw = JSON.parse(trimmed);
-            }catch(error){
-                throw new SessionError(
-                    SessionErrorType.ProviderError,
-                    "Ollama returned invalid NDJSON",
-                    error,
-                );
-            }
-            lastRaw = raw;
-
-            for (const chunk of this._protocolAdapter.parseStreamChunk(raw)){
-                switch (chunk.type){
-                    case "text_delta":
-                        content += chunk.text;
-                        if (chunk.text.length > 0){
-                            turn?.onToken?.(chunk.text, false);
-                        }
-                        break;
-
-                    case "thinking_delta":
-                        thinking += chunk.text;
-                        if (chunk.text.length > 0){
-                            turn?.onToken?.(chunk.text, true);
-                        }
-                        break;
-
-                    case "attachment":
-                        turn?.onAttachment?.(chunk.attachment);
-                        break;
-
-                    case "tool_call_delta": {
-                        const current = toolCalls.get(chunk.toolCall.index) ?? { argumentsText: "" };
-                        if (chunk.toolCall.id !== undefined) current.id = chunk.toolCall.id;
-                        if (chunk.toolCall.name !== undefined) current.name = chunk.toolCall.name;
-                        if (chunk.toolCall.argumentsDelta !== undefined){
-                            current.argumentsText += chunk.toolCall.argumentsDelta;
-                        }
-                        toolCalls.set(chunk.toolCall.index, current);
-                        break;
-                    }
-
-                    case "usage":
-                        usage = { ...chunk.usage };
-                        break;
-
-                    case "done":
-                        stopReason = chunk.stopReason;
-                        break;
-
-                    case "error":
-                        throw new SessionError(
-                            SessionErrorType.ProviderError,
-                            chunk.message ?? "Ollama stream error",
-                            chunk.failureReason,
-                        );
-                }
-            }
-        };
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        try{
-            while (true){
-                const { done, value } = await reader.read();
-                if (done) break;
-
-                buffer += decoder.decode(value, { stream: true });
-
-                let newlineIndex = buffer.indexOf("\n");
-                while (newlineIndex >= 0){
-                    const line = buffer.slice(0, newlineIndex);
-                    buffer = buffer.slice(newlineIndex + 1);
-                    consumeLine(line);
-                    newlineIndex = buffer.indexOf("\n");
-                }
-            }
-
-            buffer += decoder.decode();
-            if (buffer.trim().length > 0){
-                consumeLine(buffer);
-            }
-        }catch(error){
-            if (turn?.signal?.aborted) throw error;
-            if (error instanceof SessionError) throw error;
-            throw new SessionError(
-                SessionErrorType.ProviderError,
-                "Failed to read the Ollama stream",
-                error,
-            );
-        }finally{
-            reader.releaseLock();
-        }
-
-        const calls: ToolCall[] = [...toolCalls.entries()]
-            .sort(([a], [b]) => a - b)
-            .map(([index, call]) => {
-                let params: Record<string, unknown> = {};
-                if (call.argumentsText.trim().length > 0){
-                    try{
-                        const parsed: unknown = JSON.parse(call.argumentsText);
-                        if (!isRecord(parsed)){
-                            throw new Error("tool arguments should be an object");
-                        }
-                        params = parsed;
-                    }catch(error){
-                        throw new SessionError(
-                            SessionErrorType.ProviderError,
-                            `Invalid Ollama tool arguments at index ${index}`,
-                            error,
-                        );
-                    }
-                }
-
-                return {
-                    id: call.id ?? uniqueId(),
-                    name: call.name ?? `tool_${index}`,
-                    params,
-                };
-            });
-
-        return {
-            message: new AssistantMessage(
-                content,
-                false,
-                thinking.length > 0 ? thinking : undefined,
-                usage,
-                calls.length > 0 ? calls : undefined,
-                stopReason,
-            ),
-            raw: lastRaw,
-        };
+        return { message, raw };
     }
 }

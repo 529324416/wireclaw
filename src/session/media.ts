@@ -1,5 +1,7 @@
 /* 媒体载荷类型：Provider 输出与附件入口之间的公共协议 */
 
+import type { MediaInputLimit, ModelModality } from "./protocol";
+
 /** Provider 生成的媒体
  * - bytes：直接返回字节
  * - url：返回可下载地址
@@ -52,16 +54,52 @@ export function detectMediaMimeType(data: Uint8Array): string | undefined{
         return "image/webp";
     }
 
-    if (matches(data, 4, [0x66, 0x74, 0x79, 0x70])) return "video/mp4";
-    if (matches(data, 0, [0x1a, 0x45, 0xdf, 0xa3])) return "video/webm";
-    if (matches(data, 0, [0x52, 0x49, 0x46, 0x46]) && matches(data, 8, [0x57, 0x41, 0x56, 0x45])) {
-        return "audio/wav";
+    if (matches(data, 4, [0x66, 0x74, 0x79, 0x70])) {
+        // ISO BMFF：靠 brand 区分 MOV / 3GP / MP4
+        if (matches(data, 8, [0x71, 0x74, 0x20, 0x20])) return "video/quicktime";
+        if (matches(data, 8, [0x33, 0x67, 0x70])) return "video/3gpp";
+        return "video/mp4";
     }
+
+    if (matches(data, 0, [0x1a, 0x45, 0xdf, 0xa3])) {
+        if (containsAscii(data, "matroska", 64)) return "video/x-matroska";
+        return "video/webm";
+    }
+
+    if (matches(data, 0, [0x52, 0x49, 0x46, 0x46])) {
+        if (matches(data, 8, [0x57, 0x41, 0x56, 0x45])) return "audio/wav";
+        if (matches(data, 8, [0x41, 0x56, 0x49, 0x20])) return "video/x-msvideo";
+    }
+
+    if (matches(data, 0, [0x46, 0x4c, 0x56])) return "video/x-flv";
+    if (matches(data, 0, [0x30, 0x26, 0xb2, 0x75])) return "video/x-ms-wmv";
+    if (matches(data, 0, [0x23, 0x21, 0x41, 0x4d, 0x52])) return "audio/amr";
+    if (matches(data, 0, [0xff, 0xf1]) || matches(data, 0, [0xff, 0xf9])) return "audio/aac";
     if (matches(data, 0, [0x4f, 0x67, 0x67, 0x53])) return "audio/ogg";
     if (matches(data, 0, [0x66, 0x4c, 0x61, 0x43])) return "audio/flac";
     if (matches(data, 0, [0x49, 0x44, 0x33])) return "audio/mpeg";
     if (matches(data, 0, [0xff, 0xfb]) || matches(data, 0, [0xff, 0xf3])) return "audio/mpeg";
 
+    return undefined;
+}
+
+function containsAscii(data: Uint8Array, text: string, limit: number): boolean{
+    const max = Math.min(data.length, limit);
+    const bytes = [...text].map((char) => char.charCodeAt(0));
+    for (let offset = 0; offset + bytes.length <= max; offset += 1){
+        if (bytes.every((byte, index) => data[offset + index] === byte)) return true;
+    }
+    return false;
+}
+
+/** 根据 MIME 推导模型输入模态；文本/未知类型返回 undefined */
+export function mediaModalityFromMimeType(mimeType: string | undefined): ModelModality | undefined{
+    if (mimeType === undefined) return undefined;
+
+    const normalized = mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
+    if (normalized.startsWith("image/")) return "image";
+    if (normalized.startsWith("audio/")) return "audio";
+    if (normalized.startsWith("video/")) return "video";
     return undefined;
 }
 
@@ -74,12 +112,55 @@ export function extensionForMediaMimeType(mimeType: string): string | undefined{
         case "image/gif": return "gif";
         case "video/mp4": return "mp4";
         case "video/webm": return "webm";
+        case "video/quicktime": return "mov";
+        case "video/3gpp": return "3gp";
+        case "video/x-msvideo": return "avi";
+        case "video/x-matroska": return "mkv";
+        case "video/x-flv": return "flv";
+        case "video/x-ms-wmv": return "wmv";
         case "audio/mpeg": return "mp3";
         case "audio/wav": return "wav";
         case "audio/ogg": return "ogg";
         case "audio/flac": return "flac";
+        case "audio/aac": return "aac";
+        case "audio/amr": return "amr";
+        case "audio/3gpp": return "3gp";
         default: return undefined;
     }
+}
+
+/** 校验模型级媒体输入限制；返回问题列表，空数组表示通过 */
+export function validateMediaInputLimit(
+    input: { mimeType?: string; size: number },
+    limit: MediaInputLimit | undefined,
+): string[]{
+    if (limit === undefined) return [];
+
+    const problems: string[] = [];
+    const mimeType = input.mimeType?.split(";")[0]?.trim().toLowerCase();
+
+    if (limit.mimeTypes !== undefined && limit.mimeTypes.length > 0){
+        if (mimeType === undefined){
+            problems.push("MIME type is required");
+        }else if (!limit.mimeTypes.some((item) => item.toLowerCase() === mimeType)){
+            problems.push(`unsupported MIME type "${mimeType}"`);
+        }
+    }
+
+    if (limit.maxBytes !== undefined && input.size > limit.maxBytes){
+        problems.push(`file is too large: ${input.size} bytes (max ${limit.maxBytes})`);
+    }
+
+    if (limit.maxEncodedBytes !== undefined){
+        const encodedSize = 4 * Math.ceil(input.size / 3);
+        if (encodedSize > limit.maxEncodedBytes){
+            problems.push(
+                `encoded media is too large: ${encodedSize} bytes (max ${limit.maxEncodedBytes})`,
+            );
+        }
+    }
+
+    return problems;
 }
 
 /** 用 MIME 对应的扩展名替换文件名后缀；没有可用扩展名时保留原名 */

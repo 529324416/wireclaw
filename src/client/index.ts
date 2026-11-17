@@ -7,3 +7,4 @@ export * from "./config";
 export * from "./local-tools";
 export * from "./mcp";
 export * from "./mcp-stdio";
+export * from "./qwen-models";

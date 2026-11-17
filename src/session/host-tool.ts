@@ -70,7 +70,45 @@ export const ASK_USER_TOOL_DEFINITION: ToolDefinition = {
     },
 };
 
-/** 所有 host 内置工具（由 Session 自动注入，不需要注册到 ToolRegistry） */
+/** 查看 assistant 历史媒体的工具 */
+export const VIEW_MEDIA_TOOL_ID = "view_media";
+
+/** 模型侧完整工具名 */
+export const VIEW_MEDIA_TOOL_NAME = `${HOST_PROVIDER_ID}__${VIEW_MEDIA_TOOL_ID}`;
+
+const VIEW_MEDIA_INPUT_SCHEMA: ToolParamSchema = {
+    type: "object",
+    properties: {
+        contentHash: {
+            type: "string",
+            description: "assistant 历史媒体标记 [media:<contentHash>] 中的内容指纹",
+        },
+    },
+    required: ["contentHash"],
+};
+
+/** 内置的“查看 assistant 历史媒体”工具定义
+ * @note 只在模型同时支持媒体输入和媒体输出时由 Session 注入
+ */
+export const VIEW_MEDIA_TOOL_DEFINITION: ToolDefinition = {
+    name: VIEW_MEDIA_TOOL_NAME,
+    title: "View Media",
+    description: "重新查看当前会话中 assistant 之前生成的媒体。"
+        + "参数 contentHash 来自 assistant 消息中的 [media:<contentHash>] 标记。",
+    inputSchema: VIEW_MEDIA_INPUT_SCHEMA,
+    annotations: {
+        readOnlyHint: true,
+        requiresApproval: false,
+        concurrencySafe: true,
+    },
+    source: {
+        providerId: HOST_PROVIDER_ID,
+    },
+};
+
+/** 所有 host 内置工具（由 Session 自动注入，不需要注册到 ToolRegistry）
+ * @note view_media 是条件注入，不包含在这个静态列表里
+ */
 export const HOST_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     ASK_USER_TOOL_DEFINITION,
 ];

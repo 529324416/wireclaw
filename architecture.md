@@ -15,7 +15,9 @@
 - MCP 工具客户端（HTTP 核心，stdio 可注入）
 - 图片附件（内容指纹 + 本地/OPFS/IndexedDB 文件宿主；原始路径恢复；Ollama 以 inline base64 发送）
 - DeepSeek（Chat Completions + Files API，支持 `file_id` 上传复用）
-- 多 Provider 切换（Ollama / DeepSeek）
+- 多 Provider 切换（Ollama / DeepSeek / MiniMax / Qwen）
+- 模型级能力路由：按模型声明输入/输出模态，会话层校验图片/音频/视频输入
+- Qwen 图片/音频/视频输入；生图作为独立 `GenerationCapability`（会话级编排暂缓）
 - 会话序列化、保存/恢复
 
 ## 目录与架构
@@ -30,13 +32,17 @@ src/
                  ToolDefinition / ToolProvider / ToolRegistry、消息、事件、
                  AgentLoop、审批状态机、CloudFileManager、序列化
   platform/      AI 平台实现
+                 shared/     平台共享层
+                   openai/   OpenAI 兼容 ProtocolAdapter / Provider 基类
+                   anthropic/ 预留目录（Messages API 尚未实现）
                  ollama.ts   ProtocolAdapter / ModelProvider / AIProvider
                  deepseek.ts ProtocolAdapter / ModelProvider / CloudFileManager / AIProvider
-                 minimax/    MiniMax H3-Image / H3 Video GenerationCapability
+                 minimax/    MiniMax Chat / H3-Image / H3 Video
+                 qwen/       Qwen Chat（OpenAI 兼容）/ 独立生图 GenerationCapability
   tool/          MCP 协议客户端与 HTTP 传输（浏览器安全）
     mcp/         type / error / transport / http / client / naming / provider
   client/        Node-only 参考客户端实现（不进入核心/浏览器入口）
-                 LocalToolProvider / MCP stdio / createMcpProvider
+                 LocalToolProvider / MCP stdio / createMcpProvider / Qwen 参考覆盖表
 ```
 
 依赖方向是单向的：
@@ -61,17 +67,68 @@ platform      tool         file
 
 能力通过接口实现和类型守卫判断（`isChatProvider` / `isGenerationProvider` / `isDecisionProvider`），而不是把不支持的方法做成空实现。`ProtocolAdapter`、鉴权、端点选择和任务查询都封装在具体 Provider 内部，Session 不感知。
 
-`ModelInfo.capabilities` 用于声明**模型级**能力，而不是平台级能力：
+`ModelInfo.capabilities` 用于声明**模型级**能力，而不是平台级能力。能力按“通道 + I/O 类型”表达：
 
 ```ts
+type ModelInputType = "text" | "image" | "audio" | "video" | "structured";
+type ModelOutputType =
+  | "text" | "image" | "audio" | "video"
+  | "structured" | "decision" | "embedding";
+
 capabilities: {
-  chat?: { input?: ModelModality[]; output?: ModelModality[]; ... };
-  generate?: { image?: boolean; audio?: boolean; video?: boolean; async?: boolean; ... };
-  decide?: { structuredOutput?: boolean };
-}
+  chat?: {
+    input: ModelInputType[];
+    output: ModelOutputType[];
+    streaming?: boolean;
+    tools?: boolean;
+    thinking?: boolean;
+  };
+  generate?: {
+    input: ModelInputType[];
+    output: ModelOutputType[];
+    async?: boolean;
+    // image/audio/video 是 output 的派生快捷标记
+  };
+  decide?: {
+    input: ModelInputType[];
+    output: ModelOutputType[]; // decision / structured
+    options?: boolean;
+    structuredOutput?: boolean;
+  };
+  embed?: {
+    input: ModelInputType[];
+    output: ["embedding"];
+  };
+};
+
+// 模型级限制；与协议编码能力分开
+limits?: {
+  maxContextTokens?: number;
+  maxOutputTokens?: number;
+  input?: Partial<Record<ModelInputType, MediaInputLimit>>;
+  output?: Partial<Record<ModelOutputType, MediaInputLimit>>;
+};
 ```
 
-例如 MiniMax-H3-Image 只有 `generate.image = true`，没有 `chat`；Session 不会把它误绑成对话 Provider。
+- `capabilities` 是唯一事实源；`supportCompletion`、`supportToolCall`、`supportThink`、`isVisionModel`、`isEmbeddingModel` 只作为快捷 bool，由 `normalizeModelInfo` 统一派生；
+- `generate.image/audio/video` 也是 `output` 的派生值，不由 Provider 手写；
+- 例如 MiniMax-H3-Image 只有 `generate`（`output: ["image"]`），没有 `chat`；Session 不会把它误绑成对话 Provider。
+
+**模型能力来源策略**：
+
+- Wireclaw 只从模型 API 读取能力；不做内置探测/问模型/静态推断；
+- API 不返回模态的平台，默认按文本能力处理；
+- 宿主可以用 `AIProvider.overwrite(modelId, info)` / `overwriteMany([...])` 注入自己探测到的能力；
+- `ModelProvider` 负责合并覆盖并归一化，覆盖可以在模型列表加载前或加载后调用；
+- `src/client/qwen-models.ts` 是参考 harness 的 Qwen 覆盖表，不是核心探测逻辑，宿主可以整体替换。
+
+### 平台共享层（platform/shared）
+
+- `shared/http.ts`：base URL 归一化、Bearer 鉴权头、fetch 解析、超时/取消信号与 HTTP 错误映射。
+- `shared/stream.ts`：SSE / NDJSON 逐行读取与流式聚合（文本、思考、工具调用、usage、结束原因、附件回调）。
+- `shared/openai/`：`OpenAIProtocolAdapter` 与 `OpenAICompatibleProvider` 基类，负责 OpenAI 兼容的消息/工具/流式转换与请求骨架；平台通过覆写 `attachmentPart`、`parseUsage`、`parseStopReason`、`parseToolCalls`、`decoratePayload`、`checkChatOptions` 表达差异。
+- 当前复用者：DeepSeek（Files API 附件）、MiniMax Chat、Qwen Chat；Ollama 仅复用 NDJSON 聚合。
+- `shared/anthropic/` 为占位目录；Anthropic Messages API 的 adapter/provider 尚未实现，详见 `todo.md`。
 
 ### 包入口
 
@@ -151,7 +208,9 @@ npx tsx client.ts
 前提：
 
 - 使用 Ollama：本机 Ollama 已启动（默认 `http://127.0.0.1:11434`），并有一个支持 tools 的模型（默认优先 `qwen3.5:9b`）；图片输入需要 vision 模型。
-- 使用 DeepSeek：准备 API key（`DEEPSEEK_API_KEY` 或 `./ds-apikey.txt`），无需启动 Ollama。
+- 使用 DeepSeek：准备 API key（`DEEPSEEK_API_KEY` 或 `./apikey-ds.txt`），无需启动 Ollama。
+- 使用 MiniMax：准备 API key（`MINIMAX_API_KEY` 或 `./apikey-minimax-h3.txt`）。
+- 使用 Qwen：准备 DashScope API key（`DASHSCOPE_API_KEY` 或 `./apikey-qwen.txt`）。
 
 环境变量：
 
@@ -159,27 +218,36 @@ npx tsx client.ts
 |---|---|---|
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama 地址 |
 | `OLLAMA_MODEL` | 自动（优先 qwen3.5:9b） | 模型名 |
-| `WIRECLAW_PROVIDER` | `ollama` | 启动时使用的 LLM Provider：`ollama` / `deepseek` |
+| `WIRECLAW_PROVIDER` | `ollama` | 启动时使用的 LLM Provider：`ollama` / `deepseek` / `minimax` / `qwen` |
 | `WIRECLAW_MCP_URL` | `http://127.0.0.1:5000/mcp` | MCP Server 地址 |
 | `WIRECLAW_MCP_ID` | `mcp` | MCP 工具的 Provider 前缀 |
 | `WIRECLAW_MCP_DISABLE` | 未设置 | 设为 `1` 时不注册 MCP |
 | `WIRECLAW_FILES_DIR` | `./.wireclaw-files` | 本地附件仓库目录 |
 | `DEEPSEEK_API_KEY` | 未设置 | 直接指定 DeepSeek API key（优先于文件） |
-| `DEEPSEEK_API_KEY_FILE` | `./ds-apikey.txt` | DeepSeek API key 文件 |
+| `DEEPSEEK_API_KEY_FILE` | `./apikey-ds.txt` | DeepSeek API key 文件 |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | DeepSeek API 地址 |
 | `DEEPSEEK_MODEL` | `deepseek-flash` | DeepSeek 默认模型 |
+| `MINIMAX_API_KEY` | 未设置 | 直接指定 MiniMax API key（优先于文件） |
+| `MINIMAX_API_KEY_FILE` | `./apikey-minimax-h3.txt` | MiniMax API key 文件 |
+| `MINIMAX_BASE_URL` | `https://api.minimax.cn` | MiniMax API 地址 |
+| `MINIMAX_MODEL` | `MiniMax-M3.1-Flash` | MiniMax Chat 默认模型 |
+| `DASHSCOPE_API_KEY` | 未设置 | 直接指定 Qwen API key（优先于文件） |
+| `QWEN_API_KEY_FILE` | `./apikey-qwen.txt` | Qwen API key 文件 |
+| `QWEN_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Qwen OpenAI 兼容入口 |
+| `QWEN_MODEL` | `qwen-plus` | Qwen 默认对话模型 |
 
 CLI 命令：
 
 | 命令 | 说明 |
 |---|---|
 | `/exit` | 退出 |
-| `/provider [providerId]` | 查看/切换 LLM Provider：`ollama` / `deepseek` |
+| `/provider [providerId]` | 查看/切换 LLM Provider：`ollama` / `deepseek` / `minimax` / `qwen` |
 | `/model <name>` | 切换当前 Provider 的模型 |
 | `/list_models` | 列出当前 Provider 的模型及能力 |
 | `/tools` | 列出当前可用工具（含 MCP） |
 | `/permission [readonly\|approval\|full]` | 查看/切换权限 |
-| `/upload <image-path>` | 追加一个图片附件（jpg/jpeg/png/webp/gif），随下一条消息发送 |
+| `/upload <media-path>` | 追加图片/音频/视频附件；按当前模型的 `chat.input` 与 `limits` 做外部校验，随下一条消息发送 |
+| `/attachments` | 列出会话附件，导出到 `<WIRECLAW_FILES_DIR>/exports` 并打印 `file://` 链接，可用本地默认软件打开 |
 | `/save_session [path]` | 保存会话（默认 `./wireclaw-session.json`） |
 | `/restore_session [path]` | 恢复会话（会丢弃当前会话数据） |
 
@@ -279,6 +347,33 @@ close(): Promise<void>
 - 附件缺失或恢复失败时视为数据损坏，在调用模型前失败；
 - 失败运行不会污染历史。
 
+### 模型能力与附件路由
+
+- `AIProvider.supportsAttachmentInput`：是否能把会话附件转换为 Provider 可用表示（上传 / 内联）；默认由 `cloudFileManager` 是否存在推导。
+- `AIProvider.supportsMediaOutput`：chat 是否可能返回媒体；默认 `false`。当前没有 chat provider 声明 `true`；生图能力由独立的 `GenerationCapability` 提供。
+- `AIProvider.resolveModelCapabilities(model)`：只读取已加载的模型列表，不主动发网络请求；列表已经由 `ModelProvider` 归一化并合并外部覆盖。模型未加载或未命中时返回 `undefined`，Session 退化为 Provider 级判断。
+- 宿主可以通过 `AIProvider.overwrite` / `overwriteMany` 注入自己探测到的模型能力；Wireclaw 核心不做额外探测。
+- Session 发送前按附件 MIME 推导模态：`image/*`、`audio/*`、`video/*`；如果模型 `chat.input` 已声明且不包含该模态，直接失败，不触发上传。非媒体附件（如 `text/plain`）不参与模态校验，交由具体 Provider 判断。
+- 模型能力约束的是“输入模态”和“输出声明”；输出媒体由 Provider 实际返回，再由 Session 落盘。
+- 所有附件引用只保存 `contentHash`；真实字节只存在于 `IFileHost`。同一文件可以被多个会话引用，也可以在同一个会话中被多次引用。
+
+### assistant 媒体回放与回看
+
+- 历史与 UI 始终保留 `AttachmentRef`，Provider 返回的媒体不会丢；
+- 发送给 Provider 时，assistant 附件统一替换为 `[media:<contentHash>]` 文本标记，不直接发送附件；
+- 由于 assistant 附件只可能来自会话级媒体产出，纯文本对话不会出现该标记；
+- **`host__view_media` 条件注入**（机械判断）：
+  - 模型 `chat.output` 包含媒体模态；
+  - 模型 `chat.input` 包含同一媒体模态（否则模型看不了）；
+  - Provider 支持工具调用，且模型 `chat.tools` 不为 `false`；
+  - 因此“多媒体 → 文本”“文本 → 多媒体”“纯文本”都不会注册该工具；
+- `host__view_media` 的参数就是 `contentHash`；Session 校验它必须出现在当前会话的 assistant 消息中，不能读取任意附件；
+- **tool 媒体出站**：
+  - 当前轮的 tool 附件会转换成 synthetic user 消息（主流 chat 协议不接受 tool 媒体）；
+  - 历史 tool 附件会被剥离，避免每轮重复上传/发送；
+  - MCP 媒体接入后复用同一条链路；
+- assistant 媒体默认不自动回放；模型需要时通过 `host__view_media` 主动回看。
+
 ### Chat 输出媒体落盘
 
 Chat Provider 可以通过三种方式返回媒体：
@@ -299,10 +394,12 @@ PendingAttachment (bytes / url / remote-id)
 ```
 
 - `AttachmentIngestor` 不负责生成任务轮询，只负责媒体规范化、下载和落盘；
+- `AttachmentIngestor` 属于会话层的可选补充，**不属于协议层**：没有它，Provider 仍然可以返回媒体，只是宿主只能拿到原始字节/URL，无法得到可回放的 `AttachmentRef`；
 - URL 下载只允许 http/https，默认拒绝 localhost / 私有地址，并校验大小和 MIME；
 - `remote-id` 需要宿主注入 `resolveRemote`；
 - 没有 `AttachmentFileManager` 时，Provider 返回媒体会让本次运行失败，不会静默丢弃；
-- 流式与最终结果使用 `sourceId` 去重，最终结果覆盖同 sourceId 的流式片段。
+- 流式与最终结果使用 `sourceId` 去重，最终结果覆盖同 sourceId 的流式片段；
+- 当前没有 chat provider 实际返回媒体；`ChatResult.attachments` 链路已就绪，留给未来的会话级媒体输出。
 
 ### Provider 实现
 
@@ -341,6 +438,25 @@ PendingAttachment (bytes / url / remote-id)
   - `ModelInfo.capabilities.chat` 声明 streaming / tools / context；
   - 暂不支持 Chat 附件输入，`cloudFileManager` 为空；
   - CLI 可通过 `WIRECLAW_PROVIDER=minimax` 或 `/provider minimax` 切换。
+- **Qwen（DashScope）**
+  - 对话走 OpenAI 兼容 `POST /chat/completions`、`GET /models`；默认入口 `https://dashscope.aliyuncs.com/compatible-mode/v1`；
+  - 图片/音频/视频输入以对应内容块内联发送；`QwenCloudFileManager` 接受 image/audio/video，不上传远端；
+  - Qwen `/models` **不返回模态**；核心默认只声明文本能力，不做 ID 推断；
+  - 参考 harness `src/client/qwen-models.ts` 通过 `overwriteMany` 注入 `qwen3.8-omni-*` / `qwen3.5-omni-*` / `qwen3-omni-*` / `qwen3-vl-*` / `qwen-image-*` 的能力；宿主可以整体替换；
+  - **Chat Completions 音频/视频输入规范（已实测）**：
+    - 音频：`{ type: "input_audio", input_audio: { data: "data:audio/wav;base64,...", format: "wav" } }`；`data` 必须是完整 Data URI，裸 base64 会 400；
+    - 视频：`{ type: "video_url", video_url: { url: "https://..." } }`；**本地文件的 `data:video/mp4;base64,...` 也可用**；
+    - 文本输出需要 `modalities: ["text"]`（Qwen3.5 Omni 可防止意外音频输出）；
+    - Base64 编码后必须 <10MB；音频格式 AMR/WAV/3GP/3GPP/AAC/MP3，视频格式 MP4/AVI/MKV/MOV/FLV/WMV；
+    - `qwen3.8-omni-flash` 音频 3h / 视频 2h；`qwen3-omni-flash` 音频 20min / 视频 150s；
+  - **生图模型是独立的 `GenerationCapability`**：`qwen-image*` 不在 chat 目录中，`supportCompletion = false`、`generate.output = ["image"]`；参考覆盖表也会标记它们，`QwenChatProvider.chat()` 仍会拒绝生图模型；
+  - `QwenImageProvider` 走 DashScope 原生 `POST /api/v1/services/aigc/multimodal-generation/generation`，返回 `GeneratedMedia[]`；不经过 Session，也不伪装成对话模型；
+  - **会话级“边聊边画”暂缓**：Qwen 官方网页看起来是 host/MCP 工具编排（对话模型 + qwen-image 3.0），不是单模型能力；如果后续实现，应由 host tool 调用 `QwenImageProvider`，而不是把生图模型塞进 chat 路由；
+  - 默认对话模型：`qwen-plus`；生图模型默认：`qwen-image-2.0`；
+  - **音频/视频输入已实现**：Adapter 生成 `input_audio` / `video_url` 内容块；`QwenCloudFileManager` 接受图片/音频/视频并校验格式与 base64 <10MB；Session 按模型 `limits` 校验 MIME、编码后大小和数量；
+  - `/upload` 支持图片/音频/视频扩展名，并在上传前按当前模型能力拒绝不支持的模态；
+  - Omni 音频输出暂未实现；
+  - 实机验证：文本对话、`qwen3-vl-plus` 图片理解；独立 `QwenImageProvider` 实机验证通过（`qwen-image-2.0`，约 937KB PNG）。
 
 ### 序列化
 
@@ -353,11 +469,15 @@ PendingAttachment (bytes / url / remote-id)
 
 ### 限制
 
-- 当前支持 JPEG / PNG / GIF / WebP；
+- Chat 输入支持图片（所有视觉 Provider）以及音频/视频（Qwen Omni）；音频/视频只在 Qwen 实现了协议编码；
+- 模型级媒体限制：MIME 白名单、原始字节、base64 编码后大小、数量；时长限制字段已预留，暂未从媒体文件解析时长；
 - DeepSeek 单文件上限 64 MiB；
 - 上传/校验失败视为发送失败；
 - 路径恢复只在宿主元数据仍存在、且至少一个原始路径可读时有效；
 - 浏览器存储（OPFS）可能被静默清理；Electron 主进程建议使用 `LocalFileHost`；
+- assistant 媒体默认不回放，只保留在历史/UI；
+- MiniMax Chat 暂不支持输入附件；
+- Qwen Omni 音频输出未实现；
 - MCP 的 image/audio/resource 仍暂时转为文本占位，尚未接入附件系统。
 
 ## DeepSeek 实现（platform/deepseek.ts）
@@ -411,15 +531,15 @@ new DeepSeekProvider({
 
 ## 多 Provider
 
-- 启动时由 `WIRECLAW_PROVIDER=ollama|deepseek` 决定首选 Provider；
-- 首选不可用时自动尝试另一个；
+- 启动时由 `WIRECLAW_PROVIDER=ollama|deepseek|minimax|qwen` 决定首选 Provider；
+- 首选不可用时自动尝试其它 Provider；
 - `/provider` 查看 / 切换，Provider 实例与 CloudFileManager 缓存会被复用；
 - 切换保留会话历史；
 - 附件的远端表示会按新 Provider 重新解析；
-- DeepSeek key 读取顺序：
-  1. `DEEPSEEK_API_KEY`
-  2. `DEEPSEEK_API_KEY_FILE`（默认 `./ds-apikey.txt`）
-- key 不会写入日志、会话或源码；`ds-apikey.txt` 与 `.env*` 已在 `.gitignore` 中。
+- key 读取顺序：
+  1. 环境变量（`DEEPSEEK_API_KEY` / `MINIMAX_API_KEY` / `DASHSCOPE_API_KEY`）
+  2. key 文件（`apikey-ds.txt` / `apikey-minimax-h3.txt` / `apikey-qwen.txt`）
+- key 不会写入日志、会话或源码；`apikey*.txt` 与 `.env*` 已在 `.gitignore` 中。
 
 ## 工具系统（session 契约）
 
@@ -443,6 +563,11 @@ new DeepSeekProvider({
   - 模型调用后 run 进入暂停，发出 `TOOL_INPUT_REQUIRED` 事件；
   - 前端通过 `session.respondUserInput(...)` 提交答案，答案以 ToolMessage 返回模型；
   - 默认开启，可用 `run(..., { enableUserInput: false })` 关闭；不支持工具调用的 Provider 不会被注入。
+- host 内置工具 `host__view_media`（assistant 历史媒体回看）：
+  - 只在“模型可接收媒体 + 可产出媒体 + 支持工具调用”时注入；
+  - 参数 `contentHash` 来自 assistant 消息中的 `[media:<contentHash>]` 标记；
+  - 工具结果携带 attachment，由 Session 重新 `ensureFile` 后发送给模型；
+  - 只允许当前会话 assistant 消息中出现过的媒体，不读取任意附件。
 - 三档权限：
   - `readonly`：只允许 `readOnlyHint === true` 的工具，其余直接拒绝
   - `approval`：`requiresApproval` 的工具暂停等待人工审批
@@ -635,6 +760,9 @@ npx tsx test/tool-contract.ts
 npx tsx test/agent-loop.ts
 npx tsx test/deepseek-protocol.ts
 npx tsx test/attachment-protocol.ts
+npx tsx test/session-capabilities.ts
+npx tsx test/model-capabilities.ts
+npx tsx test/view-media.ts
 npx tsx test/local-file-host.ts
 npx tsx test/opfs-file-host.ts
 npx tsx test/indexeddb-file-host.ts
@@ -654,6 +782,21 @@ npx tsx test/mcp-heartbeat.ts
 npx tsx test/mcp-progress.ts
 npx tsx test/mcp-stdio.ts
 npx tsx test/mcp-flask.ts
+npx tsx test/shared-openai.ts
+npx tsx test/ollama-offline.ts
+npx tsx test/qwen.ts
+npx tsx test/media-input.ts
+```
+
+实机用例：
+
+```bash
+npx tsx test/ollama-protocol.ts
+npx tsx test/factory-live-deepseek.ts
+npx tsx test/qwen-live.ts
+npx tsx test/qwen-image-live.ts
+npx tsx test/qwen-media-live.ts
+npx tsx test/live-services.ts   # MiniMax Chat / H3-Image / H3-Video
 ```
 
 实机测试：

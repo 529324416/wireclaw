@@ -1,27 +1,23 @@
-import { InvalidParameterError, toBase64, uniqueId } from "../base";
-import { detectImageMimeType, normalizeImageMimeType } from "../file";
+import { InvalidParameterError } from "../base";
+import { detectImageMimeType } from "../file";
 import type { AttachmentFile } from "../session/attachment";
 import { SessionError, SessionErrorType } from "../session/error";
-import { AssistantMessage, ToolMessage } from "../session";
 import type { Message } from "../session";
-import { AIProvider, CloudFileManager, ModelProvider, ProtocolAdapter } from "../session/protocol";
-import type { ChatCapability } from "../session/protocol";
+import { CloudFileManager, ModelProvider, normalizeInputTypes } from "../session/protocol";
 import type { ModelInfo } from "../session";
-import {
-    ChatFailureReason,
-    ChatStopReason,
-} from "../session/type";
 import type {
-    AttachmentWireMap,
     ChatOptions,
-    ChatResult,
-    ChatUsage,
-    MessageContent,
     RemoteFileRef,
     SessionRuntimeOptions,
-    StreamChunk,
-    ToolCall,
 } from "../session/type";
+import {
+    buildBearerHeaders,
+    normalizeBaseUrl,
+    resolveFetch,
+} from "./shared/http";
+import { OpenAIProtocolAdapter } from "./shared/openai/adapter";
+import type { OpenAIContentPart } from "./shared/openai/adapter";
+import { OpenAICompatibleProvider } from "./shared/openai/provider";
 
 /** DeepSeek OpenAI 兼容接口默认地址 */
 export const DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com";
@@ -61,197 +57,19 @@ export type DeepSeekProviderOptions = DeepSeekEndpointOptions & {
 
 type DeepSeekRemoteFileRef = Extract<RemoteFileRef, { kind: "remote-id" }>;
 
-type DeepSeekContentPart =
-    | { type: "text"; text: string }
-    | { type: "image_url"; image_url: { url: string; detail?: string } }
-    | { type: "file"; file_id?: string; file_data?: string; filename?: string };
-
-type DeepSeekMessage = {
-    role: string;
-    content: string | DeepSeekContentPart[] | null;
-    reasoning_content?: string;
-    tool_calls?: unknown[];
-    tool_call_id?: string;
-};
-
 /** 将 DeepSeek 的 OpenAI 兼容响应/流转换为 Wireclaw 消息与片段 */
-export class DeepSeekProtocolAdapter extends ProtocolAdapter {
+export class DeepSeekProtocolAdapter extends OpenAIProtocolAdapter {
 
-    /** 将 Wireclaw Message 转成 DeepSeek OpenAI 兼容消息
-     * @note 图片/文件编码属于 DeepSeek 平台协议：file_id 使用 file 块，
-     *       内联图片使用 image_url + data URL。
-     */
-    toPayload(msg: Message, attachmentRefs?: AttachmentWireMap): DeepSeekMessage {
-        switch (msg.role) {
-            case "system":
-                return {
-                    role: "system",
-                    content: contentToText(msg.content, "system messages"),
-                };
-
-            case "user":
-                return {
-                    role: "user",
-                    content: userContent(msg.content, attachmentRefs),
-                };
-
-            case "assistant": {
-                return this._assistantPayload(msg as AssistantMessage);
-            }
-
-            case "tool": {
-                const tool = msg as ToolMessage;
-                return {
-                    role: "tool",
-                    content: contentToText(tool.content, "tool messages"),
-                    tool_call_id: tool.callId,
-                };
-            }
-
-            default:
-                throw new SessionError(
-                    SessionErrorType.InvalidData,
-                    `Unsupported DeepSeek message role: ${msg.role}`,
-                );
-        }
+    constructor() {
+        super({ label: "DeepSeek" });
     }
 
-    /** 解析非流式 chat completion 响应 */
-    toAssistantMessage(payload: unknown): AssistantMessage {
-        if (!isRecord(payload)) {
-            throw new SessionError(SessionErrorType.ProviderError, "Invalid DeepSeek response");
+    /** DeepSeek Files API 的远端文件使用 file 块引用 */
+    protected override attachmentPart(ref: RemoteFileRef): OpenAIContentPart {
+        if (ref.kind === "remote-id") {
+            return { type: "file", file_id: ref.fileId };
         }
-        if (typeof payload.error === "string") {
-            throw new SessionError(SessionErrorType.ProviderError, payload.error);
-        }
-        if (isRecord(payload.error)) {
-            throw new SessionError(
-                SessionErrorType.ProviderError,
-                typeof payload.error.message === "string" ? payload.error.message : "DeepSeek response error",
-            );
-        }
-
-        const choice = firstChoice(payload);
-        if (choice === undefined) {
-            throw new SessionError(SessionErrorType.ProviderError, "DeepSeek response has no choices");
-        }
-
-        const message = isRecord(choice.message) ? choice.message : {};
-        const content = typeof message.content === "string" ? message.content : "";
-        const thinking = typeof message.reasoning_content === "string" && message.reasoning_content.length > 0
-            ? message.reasoning_content
-            : undefined;
-        const toolCalls = parseToolCalls(message.tool_calls);
-        const usage = parseUsage(payload.usage);
-        const stopReason = parseStopReason(choice.finish_reason);
-
-        return new AssistantMessage(
-            content,
-            false,
-            thinking,
-            usage,
-            toolCalls.length > 0 ? toolCalls : undefined,
-            stopReason,
-        );
-    }
-
-    /** 解析 SSE 中的一个 JSON chunk */
-    parseStreamChunk(raw: unknown): StreamChunk[] {
-        if (!isRecord(raw)) return [];
-
-        if (typeof raw.error === "string") {
-            return [{
-                type: "error",
-                failureReason: ChatFailureReason.Unknown,
-                message: raw.error,
-            }];
-        }
-
-        if (isRecord(raw.error)) {
-            return [{
-                type: "error",
-                failureReason: ChatFailureReason.Unknown,
-                message: typeof raw.error.message === "string" ? raw.error.message : "DeepSeek stream error",
-            }];
-        }
-
-        const chunks: StreamChunk[] = [];
-        const usage = parseUsage(raw.usage);
-        if (usage !== undefined) {
-            chunks.push({ type: "usage", usage });
-        }
-
-        const choice = firstChoice(raw);
-        if (choice === undefined) return chunks;
-
-        const delta = isRecord(choice.delta) ? choice.delta : {};
-        const content = typeof delta.content === "string" ? delta.content : "";
-        if (content.length > 0) {
-            chunks.push({ type: "text_delta", text: content });
-        }
-
-        const thinking = typeof delta.reasoning_content === "string" ? delta.reasoning_content : "";
-        if (thinking.length > 0) {
-            chunks.push({ type: "thinking_delta", text: thinking });
-        }
-
-        if (Array.isArray(delta.tool_calls)) {
-            for (const [position, entry] of delta.tool_calls.entries()) {
-                if (!isRecord(entry)) continue;
-
-                const fn = isRecord(entry.function) ? entry.function : {};
-                const index = numberField(entry, "index") ?? position;
-                const id = typeof entry.id === "string" ? entry.id : undefined;
-                const name = typeof fn.name === "string" ? fn.name : undefined;
-                const args = fn.arguments;
-                const argumentsDelta = typeof args === "string"
-                    ? args
-                    : args === undefined
-                        ? undefined
-                        : JSON.stringify(args);
-
-                chunks.push({
-                    type: "tool_call_delta",
-                    toolCall: { index, id, name, argumentsDelta },
-                });
-            }
-        }
-
-        const finishReason = typeof choice.finish_reason === "string" ? choice.finish_reason : undefined;
-        if (finishReason !== undefined) {
-            chunks.push({
-                type: "done",
-                stopReason: parseStopReason(finishReason),
-            });
-        }
-
-        return chunks;
-    }
-
-    private _assistantPayload(assistant: AssistantMessage): DeepSeekMessage {
-        const content = contentToText(assistant.content, "assistant messages");
-        const payload: DeepSeekMessage = {
-            role: "assistant",
-            content: content.length > 0 ? content : null,
-        };
-
-        if (assistant.thinking !== undefined) {
-            // 携带 tools 的请求必须回传 reasoning_content；未携带 tools 时 API 会忽略它
-            payload.reasoning_content = assistant.thinking;
-        }
-
-        if (assistant.hasToolCall) {
-            payload.tool_calls = assistant.toolCalls.map((call) => ({
-                id: call.id,
-                type: "function",
-                function: {
-                    name: call.name,
-                    arguments: JSON.stringify(call.params),
-                },
-            }));
-        }
-
-        return payload;
+        return super.attachmentPart(ref);
     }
 }
 
@@ -264,9 +82,9 @@ export class DeepSeekModelProvider extends ModelProvider {
 
     constructor(options: DeepSeekEndpointOptions) {
         super();
-        this._baseUrl = normalizeBaseUrl(options.baseUrl);
-        this._headers = buildHeaders(options.apiKey, options.headers);
-        this._fetch = resolveFetch(options.fetch);
+        this._baseUrl = normalizeBaseUrl(options.baseUrl, DEEPSEEK_DEFAULT_BASE_URL);
+        this._headers = buildBearerHeaders(options.apiKey, options.headers, "DeepSeek");
+        this._fetch = resolveFetch(options.fetch, "DeepSeek");
     }
 
     async validateNetwork(): Promise<void> {
@@ -297,9 +115,7 @@ export class DeepSeekModelProvider extends ModelProvider {
         const contextWindow = numberField(raw, "context_window");
         const maxOutputTokens = numberField(raw, "max_output_tokens");
         const modalities = stringArrayField(raw, "input_modalities");
-        const isVisionModel = modalities.includes("image")
-            || id.includes("vision")
-            || id.includes("flash");
+        const input = normalizeInputTypes(modalities);
 
         const effort = isRecord(raw.effort) ? raw.effort : undefined;
         const thinkingLevels = effort === undefined
@@ -321,8 +137,21 @@ export class DeepSeekModelProvider extends ModelProvider {
             supportToolCall: true,
             supportThink,
             thinkingLevels: thinkingLevels === undefined ? undefined : [...thinkingLevels],
-            isVisionModel,
+            isVisionModel: input.includes("image"),
             isEmbeddingModel: false,
+            capabilities: {
+                chat: {
+                    input,
+                    output: ["text"],
+                    streaming: true,
+                    tools: true,
+                    thinking: supportThink,
+                },
+            },
+            limits: {
+                maxContextTokens: contextWindow,
+                maxOutputTokens,
+            },
             version: typeof raw.owned_by === "string" ? raw.owned_by : undefined,
             extraInfo: {
                 ...raw,
@@ -388,9 +217,9 @@ export class DeepSeekCloudFileManager extends CloudFileManager {
 
     constructor(options: DeepSeekEndpointOptions & DeepSeekFileOptions) {
         super();
-        this._baseUrl = normalizeBaseUrl(options.baseUrl);
-        this._headers = buildHeaders(options.apiKey, options.headers);
-        this._fetch = resolveFetch(options.fetch);
+        this._baseUrl = normalizeBaseUrl(options.baseUrl, DEEPSEEK_DEFAULT_BASE_URL);
+        this._headers = buildBearerHeaders(options.apiKey, options.headers, "DeepSeek");
+        this._fetch = resolveFetch(options.fetch, "DeepSeek");
         this._expiresAfterSeconds = resolveFileTtl(options.expiresAfterSeconds);
         this._verify = options.verify ?? true;
     }
@@ -556,37 +385,44 @@ export class DeepSeekCloudFileManager extends CloudFileManager {
 }
 
 /** DeepSeek Provider：OpenAI 兼容 Chat Completions + Files API */
-export class DeepSeekProvider extends AIProvider implements ChatCapability {
+export class DeepSeekProvider extends OpenAICompatibleProvider {
 
-    private readonly _baseUrl: string;
-    private readonly _headers: Record<string, string>;
-    private readonly _fetch: DeepSeekFetch;
-    private readonly _modelProvider: DeepSeekModelProvider;
-    private readonly _protocolAdapter: DeepSeekProtocolAdapter;
+    private readonly _deepSeekModelProvider: DeepSeekModelProvider;
+    private readonly _deepSeekProtocolAdapter: DeepSeekProtocolAdapter;
     private readonly _cloudFileManager: DeepSeekCloudFileManager;
 
     constructor(options: DeepSeekProviderOptions) {
-        super();
-        this._baseUrl = normalizeBaseUrl(options.baseUrl);
-        this._headers = buildHeaders(options.apiKey, options.headers);
-        this._fetch = resolveFetch(options.fetch);
-        this._modelProvider = new DeepSeekModelProvider(options);
-        this._protocolAdapter = new DeepSeekProtocolAdapter();
+        const modelProvider = new DeepSeekModelProvider(options);
+        const protocolAdapter = new DeepSeekProtocolAdapter();
+
+        super({
+            label: "DeepSeek",
+            baseUrl: normalizeBaseUrl(options.baseUrl, DEEPSEEK_DEFAULT_BASE_URL),
+            apiKey: options.apiKey,
+            headers: options.headers,
+            fetch: options.fetch,
+            chatPath: "/chat/completions",
+            modelProvider,
+            protocolAdapter,
+        });
+
+        this._deepSeekModelProvider = modelProvider;
+        this._deepSeekProtocolAdapter = protocolAdapter;
         this._cloudFileManager = new DeepSeekCloudFileManager({
             ...options,
             ...(options.files ?? {}),
         });
     }
 
-    override get modelProvider(): DeepSeekModelProvider { return this._modelProvider; }
-    get protocolAdapter(): DeepSeekProtocolAdapter { return this._protocolAdapter; }
-    override get cloudFileManager(): DeepSeekCloudFileManager { return this._cloudFileManager; }
-    get title(): string { return "DeepSeek"; }
+    override get modelProvider(): DeepSeekModelProvider { return this._deepSeekModelProvider; }
 
-    override get supportsTools(): boolean { return true; }
+    override get protocolAdapter(): DeepSeekProtocolAdapter { return this._deepSeekProtocolAdapter; }
+
+    override get cloudFileManager(): DeepSeekCloudFileManager { return this._cloudFileManager; }
 
     override async resolveDefaultModel(): Promise<string | undefined> {
-        const models = this._modelProvider.availableModels ?? await this._modelProvider.initModels();
+        const models = this._deepSeekModelProvider.availableModels
+            ?? await this._deepSeekModelProvider.initModels();
         const preferred = models.find(
             (model) => model.id === "deepseek-flash" || model.name === "deepseek-flash",
         ) ?? models.find(
@@ -596,20 +432,22 @@ export class DeepSeekProvider extends AIProvider implements ChatCapability {
         return preferred === undefined ? undefined : (preferred.id || preferred.name);
     }
 
-    async chat(
-        messages: readonly Message[],
+    protected override decoratePayload(
+        payload: Record<string, unknown>,
         options: SessionRuntimeOptions,
         turn?: ChatOptions,
-    ): Promise<ChatResult> {
-        if (options.model === undefined || options.model.length === 0) {
-            throw new SessionError(
-                SessionErrorType.InvalidRequest,
-                "DeepSeek requires SessionRuntimeOptions.model",
-            );
-        }
+    ): void {
+        super.decoratePayload(payload, options, turn);
+        applyThinkingOptions(payload, options);
+    }
 
+    protected override checkChatOptions(
+        _messages: readonly Message[],
+        options: SessionRuntimeOptions,
+        turn?: ChatOptions,
+    ): void {
         if (turn?.attachmentRefs !== undefined && turn.attachmentRefs.size > 0) {
-            const model = this._modelProvider.availableModels?.find(
+            const model = this._deepSeekModelProvider.availableModels?.find(
                 (item) => item.id === options.model || item.name === options.model,
             );
             if (model !== undefined && !model.isVisionModel) {
@@ -619,239 +457,12 @@ export class DeepSeekProvider extends AIProvider implements ChatCapability {
                 );
             }
         }
-
-        const payload: Record<string, unknown> = {
-            model: options.model,
-            messages: this._protocolAdapter.toPayloads([...messages], turn?.attachmentRefs),
-            stream: true,
-            stream_options: { include_usage: true },
-        };
-
-        if (options.temperature !== undefined) {
-            payload.temperature = options.temperature;
-        }
-        if (turn?.tools !== undefined && turn.tools.length > 0) {
-            payload.tools = this._protocolAdapter.toolDefinitionsToPayload(turn.tools);
-        }
-        applyThinkingOptions(payload, options);
-
-        let response: Response;
-        try {
-            response = await this._fetch(`${this._baseUrl}/chat/completions`, {
-                method: "POST",
-                headers: {
-                    ...this._headers,
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify(payload),
-                signal: turn?.signal,
-            });
-        } catch (error) {
-            if (turn?.signal?.aborted === true) throw error;
-            throw new SessionError(
-                SessionErrorType.NetworkError,
-                "DeepSeek chat request failed",
-                error,
-            );
-        }
-
-        if (!response.ok) {
-            throw new SessionError(
-                SessionErrorType.ProviderError,
-                await httpError("DeepSeek /chat/completions", response),
-            );
-        }
-        if (response.body === null) {
-            throw new SessionError(
-                SessionErrorType.ProviderError,
-                "DeepSeek returned an empty response body",
-            );
-        }
-
-        let content = "";
-        let thinking = "";
-        let usage: ChatUsage | undefined;
-        let stopReason: ChatStopReason | undefined;
-        let lastRaw: unknown;
-        let streamDone = false;
-
-        const toolCalls = new Map<number, { id?: string; name?: string; argumentsText: string }>();
-
-        const consumeLine = (line: string): void => {
-            if (!line.startsWith("data:")) return;
-
-            const data = line.slice(5).trim();
-            if (data.length === 0) return;
-            if (data === "[DONE]") {
-                streamDone = true;
-                return;
-            }
-
-            let raw: unknown;
-            try {
-                raw = JSON.parse(data);
-            } catch (error) {
-                throw new SessionError(
-                    SessionErrorType.ProviderError,
-                    "DeepSeek returned invalid SSE JSON",
-                    error,
-                );
-            }
-            lastRaw = raw;
-
-            for (const chunk of this._protocolAdapter.parseStreamChunk(raw)) {
-                switch (chunk.type) {
-                    case "text_delta":
-                        content += chunk.text;
-                        if (chunk.text.length > 0) turn?.onToken?.(chunk.text, false);
-                        break;
-
-                    case "thinking_delta":
-                        thinking += chunk.text;
-                        if (chunk.text.length > 0) turn?.onToken?.(chunk.text, true);
-                        break;
-
-                    case "attachment":
-                        turn?.onAttachment?.(chunk.attachment);
-                        break;
-
-                    case "tool_call_delta": {
-                        const current = toolCalls.get(chunk.toolCall.index) ?? { argumentsText: "" };
-                        if (chunk.toolCall.id !== undefined) current.id = chunk.toolCall.id;
-                        if (chunk.toolCall.name !== undefined) current.name = chunk.toolCall.name;
-                        if (chunk.toolCall.argumentsDelta !== undefined) {
-                            current.argumentsText += chunk.toolCall.argumentsDelta;
-                        }
-                        toolCalls.set(chunk.toolCall.index, current);
-                        break;
-                    }
-
-                    case "usage":
-                        usage = { ...chunk.usage };
-                        break;
-
-                    case "done":
-                        stopReason = chunk.stopReason;
-                        break;
-
-                    case "error":
-                        throw new SessionError(
-                            SessionErrorType.ProviderError,
-                            chunk.message ?? "DeepSeek stream error",
-                            chunk.failureReason,
-                        );
-                }
-            }
-        };
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        try {
-            while (!streamDone) {
-                const { done, value } = await reader.read();
-                if (done) break;
-
-                buffer += decoder.decode(value, { stream: true });
-
-                let newlineIndex = buffer.indexOf("\n");
-                while (newlineIndex >= 0 && !streamDone) {
-                    const line = buffer.slice(0, newlineIndex).replace(/\r$/, "");
-                    buffer = buffer.slice(newlineIndex + 1);
-                    consumeLine(line);
-                    newlineIndex = buffer.indexOf("\n");
-                }
-            }
-
-            if (!streamDone) {
-                buffer += decoder.decode();
-                if (buffer.trim().length > 0) consumeLine(buffer);
-            }
-        } catch (error) {
-            if (turn?.signal?.aborted === true) throw error;
-            if (error instanceof SessionError) throw error;
-            throw new SessionError(
-                SessionErrorType.ProviderError,
-                "Failed to read the DeepSeek stream",
-                error,
-            );
-        } finally {
-            await reader.cancel().catch(() => {
-                // 读取结束/中断时取消流失败不影响结果
-            });
-            reader.releaseLock();
-        }
-
-        const calls: ToolCall[] = [...toolCalls.entries()]
-            .sort(([a], [b]) => a - b)
-            .map(([index, call]) => {
-                let params: Record<string, unknown> = {};
-                if (call.argumentsText.trim().length > 0) {
-                    try {
-                        const parsed: unknown = JSON.parse(call.argumentsText);
-                        if (!isRecord(parsed)) {
-                            throw new Error("tool arguments should be an object");
-                        }
-                        params = parsed;
-                    } catch (error) {
-                        throw new SessionError(
-                            SessionErrorType.ProviderError,
-                            `Invalid DeepSeek tool arguments at index ${index}`,
-                            error,
-                        );
-                    }
-                }
-
-                return {
-                    id: call.id ?? uniqueId(),
-                    name: call.name ?? `tool_${index}`,
-                    params,
-                };
-            });
-
-        return {
-            message: new AssistantMessage(
-                content,
-                false,
-                thinking.length > 0 ? thinking : undefined,
-                usage,
-                calls.length > 0 ? calls : undefined,
-                stopReason,
-            ),
-            raw: lastRaw,
-        };
     }
 }
 
 /* ---------------------------------------------------------------------------
  * 通用辅助
  * ------------------------------------------------------------------------- */
-
-function normalizeBaseUrl(baseUrl: string | undefined): string {
-    const trimmed = (baseUrl ?? DEEPSEEK_DEFAULT_BASE_URL).trim();
-    const resolved = trimmed.length > 0 ? trimmed : DEEPSEEK_DEFAULT_BASE_URL;
-    return resolved.replace(/\/+$/, "");
-}
-
-function buildHeaders(apiKey: string, headers: Record<string, string> | undefined): Record<string, string> {
-    if (typeof apiKey !== "string" || apiKey.trim().length === 0) {
-        throw new InvalidParameterError("DeepSeek requires a non-empty API key");
-    }
-
-    return {
-        Authorization: `Bearer ${apiKey.trim()}`,
-        ...(headers ?? {}),
-    };
-}
-
-function resolveFetch(fetchImpl: DeepSeekFetch | undefined): DeepSeekFetch {
-    const resolved = fetchImpl ?? globalThis.fetch;
-    if (typeof resolved !== "function") {
-        throw new InvalidParameterError("DeepSeek requires a fetch implementation");
-    }
-    return resolved;
-}
 
 function resolveFileTtl(value: number | null | undefined): number | null {
     if (value === null) return null;
@@ -867,159 +478,6 @@ function resolveFileTtl(value: number | null | undefined): number | null {
     }
 
     return ttl;
-}
-
-function contentToText(content: MessageContent, context: string): string {
-    if (typeof content === "string") return content;
-
-    const pieces: string[] = [];
-    for (const part of content) {
-        if (part.type === "attachment") {
-            throw new SessionError(
-                SessionErrorType.InvalidData,
-                `DeepSeek does not support attachments in ${context}`,
-            );
-        }
-        pieces.push(part.text);
-    }
-    return pieces.join("\n");
-}
-
-function userContent(
-    content: MessageContent,
-    attachmentRefs: AttachmentWireMap | undefined,
-): string | DeepSeekContentPart[] {
-    if (typeof content === "string") return content;
-
-    const parts: DeepSeekContentPart[] = [];
-
-    for (const part of content) {
-        if (part.type === "text") {
-            parts.push({ type: "text", text: part.text });
-            continue;
-        }
-
-        if (attachmentRefs === undefined) {
-            throw new SessionError(
-                SessionErrorType.InvalidData,
-                `Missing DeepSeek attachment wire map for "${part.attachment.contentHash}"`,
-            );
-        }
-
-        const ref = attachmentRefs.get(part.attachment.contentHash);
-        if (ref === undefined) {
-            throw new SessionError(
-                SessionErrorType.InvalidData,
-                `DeepSeek attachment reference was not resolved: ${part.attachment.contentHash}`,
-            );
-        }
-
-        parts.push(attachmentToContentPart(ref));
-    }
-
-    return parts;
-}
-
-function attachmentToContentPart(ref: RemoteFileRef): DeepSeekContentPart {
-    switch (ref.kind) {
-        case "remote-id":
-            return { type: "file", file_id: ref.fileId };
-
-        case "url":
-            return { type: "image_url", image_url: { url: ref.url } };
-
-        case "inline": {
-            const mimeType = detectImageMimeType(ref.data)
-                ?? normalizeImageMimeType(ref.mimeType);
-            if (mimeType === undefined) {
-                throw new SessionError(
-                    SessionErrorType.InvalidData,
-                    `DeepSeek only supports JPEG/PNG/GIF/WebP images, got "${ref.mimeType ?? "unknown"}"`,
-                );
-            }
-            return {
-                type: "image_url",
-                image_url: {
-                    url: `data:${mimeType};base64,${toBase64(ref.data)}`,
-                },
-            };
-        }
-    }
-}
-
-function parseToolCalls(value: unknown): ToolCall[] {
-    if (!Array.isArray(value)) return [];
-
-    return value.map((entry, index) => {
-        const record = isRecord(entry) ? entry : {};
-        const fn = isRecord(record.function) ? record.function : {};
-        const name = typeof fn.name === "string" ? fn.name : "";
-        let params: Record<string, unknown> = {};
-
-        if (isRecord(fn.arguments)) {
-            params = { ...fn.arguments };
-        } else if (typeof fn.arguments === "string" && fn.arguments.trim().length > 0) {
-            try {
-                const parsed: unknown = JSON.parse(fn.arguments);
-                if (!isRecord(parsed)) {
-                    throw new Error("tool arguments should be an object");
-                }
-                params = parsed;
-            } catch (error) {
-                throw new SessionError(
-                    SessionErrorType.ProviderError,
-                    `Invalid DeepSeek tool arguments at index ${index}`,
-                    error,
-                );
-            }
-        }
-
-        return {
-            id: typeof record.id === "string" ? record.id : uniqueId(),
-            name,
-            params,
-        };
-    });
-}
-
-function parseUsage(value: unknown): ChatUsage | undefined {
-    if (!isRecord(value)) return undefined;
-
-    const prompt = typeof value.prompt_tokens === "number" ? value.prompt_tokens : undefined;
-    const completion = typeof value.completion_tokens === "number" ? value.completion_tokens : undefined;
-    if (prompt === undefined && completion === undefined) return undefined;
-
-    const promptTokens = prompt ?? 0;
-    const completionTokens = completion ?? 0;
-    return {
-        promptTokens,
-        completionTokens,
-        totalTokens: typeof value.total_tokens === "number"
-            ? value.total_tokens
-            : promptTokens + completionTokens,
-    };
-}
-
-function parseStopReason(value: unknown): ChatStopReason | undefined {
-    switch (value) {
-        case "stop":
-            return ChatStopReason.Stop;
-        case "length":
-            return ChatStopReason.Length;
-        case "tool_calls":
-        case "tool_call":
-            return ChatStopReason.ToolCall;
-        case "content_filter":
-            return ChatStopReason.ContentFilter;
-        default:
-            return undefined;
-    }
-}
-
-function firstChoice(payload: Record<string, unknown>): Record<string, unknown> | undefined {
-    if (!Array.isArray(payload.choices) || payload.choices.length === 0) return undefined;
-    const choice = payload.choices[0];
-    return isRecord(choice) ? choice : undefined;
 }
 
 function applyThinkingOptions(payload: Record<string, unknown>, options: SessionRuntimeOptions): void {

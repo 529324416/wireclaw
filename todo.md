@@ -49,7 +49,7 @@ MCP 并不只是「跨进程提供工具」：
 - [ ] MCP `elicitation`（服务端发起的人工输入，复用 ask_user 表单机制）
 - [ ] 更完整的 JSON Schema 校验（`pattern` / `oneOf` / `$ref` 等）
 - [x] 用户图片附件（Ollama inline / DeepSeek Files API）
-- [ ] MCP 多模态结果接入附件系统
+- [ ] MCP 多模态结果接入附件系统，并作为输入回传模型（tool 生成的外部媒体；assistant 自身生成的媒体默认不回放）
 - [ ] `tasks` / 长任务
 - [x] 协议版本窗口：`2025-11-25` / `2025-06-18`，移除 `2024-11-05` 与旧版 HTTP+SSE
 - [ ] `2026-07-28` 无状态客户端评估（移除 initialize / session）
@@ -57,8 +57,15 @@ MCP 并不只是「跨进程提供工具」：
 ### 工程化
 
 - [x] `AIProvider` 能力契约：`chat` / `generate` / `decide`，`send` 重命名为 `chat`
-- [ ] Model 级 capabilities：按模型声明能力、输入/输出模态，而不是只按 Provider 声明
+- [x] Model 级 capabilities：通道 + I/O 类型（text/image/audio/video/structured/decision/embedding），并接入 Session 附件路由
+- [x] ModelLimits：模型级输入限制，与协议编码/Provider 传输限制分层
+- [x] `AIProvider.overwrite` / `overwriteMany` + `ModelProvider` 覆盖合并；核心只读模型 API，外部注入探测结果
+- [x] 归一化模型能力：`capabilities` 唯一事实源，legacy bool 由 `normalizeModelInfo` 派生
+- [x] Qwen Chat Completions 音视频输入规范确认（Data URI、编码后 <10MB、格式/时长）
 - [x] `createNewSession` 组装入口：新历史、可选附件管理器、可选运行时选项、默认模型解析
+- [x] `platform/shared` 共享层：HTTP / SSE / NDJSON 流式聚合 / OpenAI 兼容 adapter + provider 基类
+- [x] DeepSeek、MiniMax Chat 迁移到共享基类；Ollama 复用共享流式聚合
+- [ ] Anthropic 协议基类（`src/platform/shared/anthropic` 已预留空目录，待实现 Messages API）
 - [x] 构建与分发：tsup 输出 browser/node bundle，tsc 输出声明，`exports` / `files` / `prepublishOnly`
 - [x] MiniMax H3-Image `GenerationCapability`（URL / b64_json + 模型级 capabilities）
 - [x] MiniMax H3-Image 实机测试（国内站 `https://api.minimax.cn`，1K PNG）
@@ -66,6 +73,18 @@ MCP 并不只是「跨进程提供工具」：
 - [x] MiniMax H3 视频实机测试（4s / 768P / 16:9，H.264 + AAC）
 - [x] MiniMax Chat Provider（M3/M2 文本对话、模型列表、流式与工具调用）
 - [x] MiniMax Chat 实机测试（国内站，流式文本）
+- [x] Qwen Chat Provider（OpenAI 兼容，图片/音频/视频输入，模型能力声明）
+- [x] Qwen 音频/视频输入适配（`input_audio` / `video_url`，Data URI）
+- [x] `/upload` 多媒体附件 + 模型输入能力外部校验
+- [x] 模型级输入限制校验：MIME 白名单、原始/编码大小、数量；新增 `UnsupportedInput` / `InputLimitExceeded` / `UnsupportedMediaFormat`
+- [x] Qwen 音频/视频输入实机测试（Session 链路 + 文本模型负向拒绝）
+- [x] Qwen-Image 独立 `GenerationCapability`（DashScope multimodal-generation）
+- [x] Qwen 实机测试（对话 / 图片理解；独立生图 Provider 实机验证）
+- [x] assistant 媒体回放策略：历史保留、默认不回传、统一写 `[media:<contentHash>]` 标记
+- [x] `host__view_media` 条件注入：按模型输入/输出媒体能力机械判断
+- [x] tool 媒体出站：当前轮转 synthetic user 消息，历史 tool 媒体剥离
+- [ ] Provider 原生 tool media 出站（Anthropic native 等，当前统一走 synthetic user）
+- [ ] Qwen Omni 音频输出（暂缓）
 - [ ] 多 Server 配置加载
 - [ ] 工具 allowlist / 按 Server 的审批、并发、超时覆盖
 - [ ] 鉴权（OAuth / 动态注册）—— 暂缓
@@ -126,3 +145,4 @@ MCP 并不只是「跨进程提供工具」：
 - 允许自由切换 AIProvider， Provider 实例与 CloudFileManager 缓存应复用。
 - DeepSeek 测试 key 仅本地使用，必须保持在 `.gitignore` 内。
 - 附件系统仍需补齐生命周期、错误类型、浏览器宿主和 MCP 多模态接入。
+- assistant 自己生成的媒体默认不回放；MCP/tool 生成的外部媒体才需要作为输入回传给模型。

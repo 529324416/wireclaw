@@ -31,6 +31,8 @@ export const MINIMAX_H3_IMAGE_MODEL_INFO: ModelInfo = {
     isEmbeddingModel: false,
     capabilities: {
         generate: {
+            input: ["text"],
+            output: ["image"],
             image: true,
             audio: false,
             video: false,
@@ -117,6 +119,8 @@ export class MiniMaxH3ImageProvider extends AIProvider implements GenerationCapa
             name: this._model,
             capabilities: {
                 generate: {
+                    input: ["text"],
+                    output: ["image"],
                     image: true,
                     audio: false,
                     video: false,

@@ -29,8 +29,10 @@ export const MINIMAX_H3_VIDEO_MODEL_INFO: ModelInfo = {
     isEmbeddingModel: false,
     capabilities: {
         generate: {
+            input: ["text"],
+            output: ["video"],
             image: false,
-            audio: true,
+            audio: false,
             video: true,
             async: true,
             context: false,
@@ -111,8 +113,10 @@ export class MiniMaxH3VideoProvider extends AIProvider implements GenerationCapa
             name: this._model,
             capabilities: {
                 generate: {
+                    input: ["text"],
+                    output: ["video"],
                     image: false,
-                    audio: true,
+                    audio: false,
                     video: true,
                     async: true,
                     context: false,
