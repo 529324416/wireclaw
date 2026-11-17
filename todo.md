@@ -85,6 +85,7 @@ MCP 并不只是「跨进程提供工具」：
 - [x] tool 媒体出站：当前轮转 synthetic user 消息，历史 tool 媒体剥离
 - [ ] Provider 原生 tool media 出站（Anthropic native 等，当前统一走 synthetic user）
 - [ ] Qwen Omni 音频输出（暂缓）
+- [ ] 显式模型且未初始化模型目录时的能力/限制兜底（可选自动 initModels 或要求宿主初始化）
 - [ ] 多 Server 配置加载
 - [ ] 工具 allowlist / 按 Server 的审批、并发、超时覆盖
 - [ ] 鉴权（OAuth / 动态注册）—— 暂缓
