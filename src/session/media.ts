@@ -129,9 +129,11 @@ export function extensionForMediaMimeType(mimeType: string): string | undefined{
     }
 }
 
-/** 校验模型级媒体输入限制；返回问题列表，空数组表示通过 */
+/** 校验模型级媒体输入限制；返回问题列表，空数组表示通过
+ * @param input.durationSeconds 媒体时长；模型声明 maxDurationSeconds 时必须提供
+ */
 export function validateMediaInputLimit(
-    input: { mimeType?: string; size: number },
+    input: { mimeType?: string; size: number; durationSeconds?: number },
     limit: MediaInputLimit | undefined,
 ): string[]{
     if (limit === undefined) return [];
@@ -160,7 +162,24 @@ export function validateMediaInputLimit(
         }
     }
 
+    if (limit.maxDurationSeconds !== undefined){
+        if (input.durationSeconds === undefined){
+            problems.push("media duration could not be determined");
+        } else if (!Number.isFinite(input.durationSeconds) || input.durationSeconds < 0){
+            problems.push(`invalid media duration: ${String(input.durationSeconds)}`);
+        } else if (input.durationSeconds > limit.maxDurationSeconds){
+            problems.push(
+                `media duration is too long: ${formatSeconds(input.durationSeconds)} `
+                    + `(max ${formatSeconds(limit.maxDurationSeconds)})`,
+            );
+        }
+    }
+
     return problems;
+}
+
+function formatSeconds(value: number): string{
+    return `${Math.round(value * 1000) / 1000}s`;
 }
 
 /** 用 MIME 对应的扩展名替换文件名后缀；没有可用扩展名时保留原名 */

@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
-import { sanitizePathInput } from "./src/base";
+import { readMediaDuration, sanitizePathInput } from "./src/base";
 
 import { LocalFileHost, readLocalSourcePath } from "./src/file/local";
 import {
@@ -36,7 +36,7 @@ import {
     ToolRegistry,
     validateMediaInputLimit,
 } from "./src/session/index";
-import type { ChatProvider } from "./src/session/protocol";
+import type { ChatProvider, ModelInfo } from "./src/session/protocol";
 import { SessionEventType } from "./src/session/type";
 import type { Message } from "./src/session/message";
 import type {
@@ -929,38 +929,47 @@ async function main(): Promise<void> {
                             continue;
                         }
 
+                        const durationSeconds = modality === "audio" || modality === "video"
+                            ? readMediaDuration(bytes, mimeType)
+                            : undefined;
+
+                        let modelInfo: ModelInfo | undefined;
                         const modelProvider = currentProviderRuntime.provider.modelProvider;
                         if (modelProvider !== null) {
                             try {
                                 const models = modelProvider.availableModels
                                     ?? await modelProvider.initModels();
-                                const modelInfo = models.find(
+                                modelInfo = models.find(
                                     item => item.id === currentModel || item.name === currentModel,
                                 );
-                                if (modelInfo !== undefined) {
-                                    const input = modelInfo.capabilities?.chat?.input;
-                                    if (input !== undefined && !input.includes(modality)) {
-                                        console.log(
-                                            `[upload] model "${currentModel}" does not support ${modality} input`,
-                                        );
-                                        continue;
-                                    }
-
-                                    const limit = modelInfo.limits?.input?.[modality];
-                                    const problems = validateMediaInputLimit({
-                                        mimeType,
-                                        size: bytes.byteLength,
-                                    }, limit);
-                                    if (problems.length > 0) {
-                                        console.log(
-                                            `[upload] ${modality} rejected: ${problems.join("; ")}`,
-                                        );
-                                        continue;
-                                    }
+                                const input = modelInfo?.capabilities?.chat?.input;
+                                if (input !== undefined && !input.includes(modality)) {
+                                    console.log(
+                                        `[upload] model "${currentModel}" does not support ${modality} input`,
+                                    );
+                                    continue;
                                 }
                             } catch (error) {
                                 console.log(`[upload] model capability check skipped: ${errorMessage(error)}`);
                             }
+                        }
+
+                        const providerLimit = currentProviderRuntime
+                            .provider.defaultModelLimits?.input?.[modality];
+                        const modelLimit = modelInfo?.limits?.input?.[modality];
+                        const limit = providerLimit === undefined
+                            ? modelLimit
+                            : modelLimit === undefined
+                                ? providerLimit
+                                : { ...providerLimit, ...modelLimit };
+                        const problems = validateMediaInputLimit({
+                            mimeType,
+                            size: bytes.byteLength,
+                            durationSeconds,
+                        }, limit);
+                        if (problems.length > 0) {
+                            console.log(`[upload] ${modality} rejected: ${problems.join("; ")}`);
+                            continue;
                         }
 
                         const file = await attachmentManager.put(

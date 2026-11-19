@@ -1,4 +1,4 @@
-import { uniqueId } from "../base";
+import { readMediaDuration, uniqueId } from "../base";
 import { SessionError, SessionErrorType, ToolError, ToolErrorType } from "./error";
 import type { AttachmentFileManager } from "./attachment-manager";
 import { AttachmentIngestor } from "./attachment-ingestor";
@@ -15,8 +15,10 @@ import { isChatProvider } from "./protocol";
 import type {
     AIProvider,
     ChatProvider,
+    MediaInputLimit,
     ModelCapabilities,
     ModelInfo,
+    ModelLimits,
     ModelModality,
 } from "./protocol";
 import {
@@ -449,6 +451,9 @@ export type RunContext = {
 
     /** 当前模型可接收的媒体模态；用于把 tool 媒体转换为 user 消息 */
     viewableModalities: readonly ModelModality[];
+
+    /** 解析附件的内容模态；用于 host__view_media 校验目标媒体是否可回放 */
+    resolveMediaModality: (contentHash: string) => Promise<ModelModality | undefined>;
 
     /** 请求人工输入；返回用户回答 */
     requestUserInput: (request: UserInputRequest, call: ToolCall) => Promise<UserInputResult>;
@@ -910,6 +915,23 @@ export class RunEngine{
             ));
         }
 
+        // 只允许当前模型确实能接收的媒体模态；避免把音频/视频塞给纯视觉模型
+        const modality = await ctx.resolveMediaModality(rawHash);
+        if (modality === undefined){
+            return toolErrorResult(new ToolError(
+                ToolErrorType.InvalidParams,
+                false,
+                `Media ${rawHash} is not a supported image, audio or video attachment`,
+            ));
+        }
+        if (!ctx.viewableModalities.includes(modality)){
+            return toolErrorResult(new ToolError(
+                ToolErrorType.InvalidParams,
+                false,
+                `The current model cannot receive ${modality} media`,
+            ));
+        }
+
         const duration = Math.max(0, Math.round(performance.now() - startedAt));
         return {
             content: [
@@ -1266,7 +1288,7 @@ export class Session{
         );
         const enableViewMedia = provider.supportsTools
             && modelCapabilities?.chat?.tools !== false
-            && viewableModalities.includes("image");
+            && viewableModalities.length > 0;
         const snapshot = history.snapshot();
 
         const inputMessage = user(input);
@@ -1296,6 +1318,7 @@ export class Session{
             enableUserInput,
             enableViewMedia,
             viewableModalities,
+            resolveMediaModality: (contentHash) => this._resolveMediaModality(contentHash),
             requestUserInput: (request, call) => this._requestUserInput(request, call),
             requestApproval: (request) => this._requestApproval(request),
             prepareMessages: async (messages) =>
@@ -1459,14 +1482,24 @@ export class Session{
                     );
                 }
 
-                const limit = modelInfo?.limits?.input?.[modality];
+                const limit = resolveMediaInputLimit(
+                    provider.defaultModelLimits,
+                    modelInfo?.limits,
+                    modality,
+                );
+                const durationSeconds = limit?.maxDurationSeconds === undefined
+                    ? undefined
+                    : readMediaDuration(file.content, mimeType);
                 const problems = validateMediaInputLimit({
                     mimeType,
                     size: file.size,
+                    durationSeconds,
                 }, limit);
                 if (problems.length > 0){
                     const formatProblem = problems.some((problem) =>
-                        problem.startsWith("unsupported MIME type"));
+                        problem.startsWith("unsupported MIME type")
+                        || problem.startsWith("media duration could not be determined")
+                        || problem.startsWith("invalid media duration"));
                     throw new SessionError(
                         formatProblem
                             ? SessionErrorType.UnsupportedMediaFormat
@@ -1492,6 +1525,18 @@ export class Session{
 
         this._attachmentRefs = attachmentRefs;
         return attachmentRefs;
+    }
+
+    /** 解析附件的内容模态；附件缺失或不是媒体时返回 undefined */
+    private async _resolveMediaModality(contentHash: string): Promise<ModelModality | undefined>{
+        const manager = this._attachmentManager;
+        if (manager === undefined) return undefined;
+
+        const file = await manager.get(contentHash);
+        if (file === undefined) return undefined;
+
+        const mimeType = file.mimeType ?? detectMediaMimeType(file.content);
+        return mediaModalityFromMimeType(mimeType);
     }
 
     /** 请求人工输入；由 RunEngine 在调用 host__ask_user 时调用 */
@@ -1610,6 +1655,19 @@ function pendingAttachmentKey(attachment: PendingAttachment, fallbackIndex: numb
             // 没有 sourceId 时不能按大小/名称去重，否则同尺寸图片会被误合并
             return `bytes:${fallbackIndex}`;
     }
+}
+
+/** 合并 Provider 级默认限制与模型级限制；模型声明优先 */
+function resolveMediaInputLimit(
+    providerLimits: ModelLimits | undefined,
+    modelLimits: ModelLimits | undefined,
+    modality: ModelModality,
+): MediaInputLimit | undefined{
+    const base = providerLimits?.input?.[modality];
+    const specific = modelLimits?.input?.[modality];
+    if (base === undefined) return specific;
+    if (specific === undefined) return base;
+    return { ...base, ...specific };
 }
 
 /** 计算工具调用超时：工具建议值优先，默认 30s，上限 1h */

@@ -616,6 +616,12 @@ export abstract class AIProvider{
     /** 该 Provider 的 chat 是否可能返回媒体；默认不返回 */
     get supportsMediaOutput(): boolean { return false; }
 
+    /** Provider 级媒体输入默认限制
+     * @note 模型目录尚未加载、或模型未声明 limits 时作为兜底；
+     *       模型级 limits 按模态覆盖这里的同名字段。
+     */
+    get defaultModelLimits(): ModelLimits | undefined { return undefined; }
+
     /** 覆盖单个模型能力；由宿主探测后注入
      * @note 模型不存在时会追加到模型目录
      */

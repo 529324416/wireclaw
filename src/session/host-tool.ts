@@ -93,7 +93,7 @@ const VIEW_MEDIA_INPUT_SCHEMA: ToolParamSchema = {
 export const VIEW_MEDIA_TOOL_DEFINITION: ToolDefinition = {
     name: VIEW_MEDIA_TOOL_NAME,
     title: "View Media",
-    description: "重新查看当前会话中 assistant 之前生成的媒体。"
+    description: "重新查看当前会话中 assistant 之前生成的媒体（图片/音频/视频）。"
         + "参数 contentHash 来自 assistant 消息中的 [media:<contentHash>] 标记。",
     inputSchema: VIEW_MEDIA_INPUT_SCHEMA,
     annotations: {

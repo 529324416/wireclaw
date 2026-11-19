@@ -88,6 +88,8 @@ await session.run("你好");
 
 Qwen 的 `/models` 不返回输入模态。参考客户端会调用 `wireclaw/client` 的 `applyQwenReferenceModelOverrides`；库使用者应通过 `provider.overwriteMany(...)` 注入自己的探测结果。Omni 模型可以接收文本、图片、音频和视频（音频/视频以 Data URI 发送）。`qwen-image-*` 是独立的 `GenerationCapability`，不是对话模型；需要直接生图时使用 `QwenImageProvider`。
 
+`Session` 会在上传前执行当前模型的媒体输入限制（MIME、原始/编码后大小、数量、时长）。Qwen 内联音频/视频经 base64 编码后上限为 10 MB。
+
 ## 附件：Node 本地文件
 
 ```ts

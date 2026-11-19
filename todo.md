@@ -83,6 +83,9 @@ MCP 并不只是「跨进程提供工具」：
 - [x] assistant 媒体回放策略：历史保留、默认不回传、统一写 `[media:<contentHash>]` 标记
 - [x] `host__view_media` 条件注入：按模型输入/输出媒体能力机械判断
 - [x] tool 媒体出站：当前轮转 synthetic user 消息，历史 tool 媒体剥离
+- [x] `host__view_media` 加入对音频和视频的回放支持
+- [x] 新增媒体时长限制强制执行
+- [x] 新增本地音频/视频超过 base64 10MB 时被拒绝
 - [ ] Provider 原生 tool media 出站（Anthropic native 等，当前统一走 synthetic user）
 - [ ] Qwen Omni 音频输出（暂缓）
 - [ ] 显式模型且未初始化模型目录时的能力/限制兜底（可选自动 initModels 或要求宿主初始化）

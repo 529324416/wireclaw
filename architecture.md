@@ -13,10 +13,11 @@
 - 工具审批暂停与恢复（`resume`）
 - 本地工具与 MCP stdio（由参考客户端 `src/client` / `wireclaw/client` 提供；核心包只保留契约与 HTTP 传输）
 - MCP 工具客户端（HTTP 核心，stdio 可注入）
-- 图片附件（内容指纹 + 本地/OPFS/IndexedDB 文件宿主；原始路径恢复；Ollama 以 inline base64 发送）
+- 媒体附件（内容指纹 + 本地/OPFS/IndexedDB 文件宿主；原始路径恢复；Ollama 以 inline base64 发送）
 - DeepSeek（Chat Completions + Files API，支持 `file_id` 上传复用）
 - 多 Provider 切换（Ollama / DeepSeek / MiniMax / Qwen）
 - 模型级能力路由：按模型声明输入/输出模态，会话层校验图片/音频/视频输入
+- 媒体输入限制：MIME、原始/编码后大小、数量、时长；支持音频/视频容器时长解析
 - Qwen 图片/音频/视频输入；生图作为独立 `GenerationCapability`（会话级编排暂缓）
 - 会话序列化、保存/恢复
 
@@ -24,7 +25,7 @@
 
 ```
 src/
-  base/          纯原语（错误、JSON 工具、ID、编码）
+  base/          纯原语（错误、JSON 工具、ID、编码、媒体时长解析）
   file/          附件宿主实现与文件工具
                  LocalFileHost / OpfsFileHost / IndexedDbFileHost / MemoryFileHost / 图片类型识别
   session/       契约与运行时
@@ -355,7 +356,19 @@ close(): Promise<void>
 - 宿主可以通过 `AIProvider.overwrite` / `overwriteMany` 注入自己探测到的模型能力；Wireclaw 核心不做额外探测。
 - Session 发送前按附件 MIME 推导模态：`image/*`、`audio/*`、`video/*`；如果模型 `chat.input` 已声明且不包含该模态，直接失败，不触发上传。非媒体附件（如 `text/plain`）不参与模态校验，交由具体 Provider 判断。
 - 模型能力约束的是“输入模态”和“输出声明”；输出媒体由 Provider 实际返回，再由 Session 落盘。
+- `AIProvider.defaultModelLimits`：Provider 级媒体输入默认限制。模型目录尚未加载、或模型 `limits` 未声明某个模态时，Session 用它兜底；模型级限制按模态覆盖同名字段。
 - 所有附件引用只保存 `contentHash`；真实字节只存在于 `IFileHost`。同一文件可以被多个会话引用，也可以在同一个会话中被多次引用。
+
+### 媒体输入限制与时长
+
+- Session 在 `ensureFile` 之前统一执行模型级媒体输入校验：MIME 白名单、原始字节、base64 编码后大小、数量、时长。
+- 有效限制 = `AIProvider.defaultModelLimits` 与当前模型 `ModelInfo.limits` 的按模态合并；模型字段优先。
+- 时长由 `src/base/media-duration.ts` 的 `readMediaDuration(data, mimeType)` 直接从容器元数据读取；它是纯工具函数，不依赖 DOM / Node / session：
+  - 音频：WAV、MP3（含 Xing/VBRI）、AAC/ADTS、AMR / AMR-WB；
+  - 视频：MP4 / MOV / 3GP（ISO BMFF `mvhd` / `mdhd` / `mehd`）、WebM / MKV（EBML）、AVI（RIFF）、FLV（AMF0 `onMetaData`）、WMV（ASF）；
+  - 无法识别或容器损坏时返回 `undefined`。
+- 如果模型声明 `maxDurationSeconds` 但无法确定时长，按 `UnsupportedMediaFormat` 拒绝；确定但超限按 `InputLimitExceeded` 拒绝。
+- Qwen 的 10MB base64 编码上限通过 `QwenChatProvider.defaultModelLimits` 前移到 Session，模型目录未初始化时也会生效；`QwenCloudFileManager` 仍保留同样上限作为双保险。
 
 ### assistant 媒体回放与回看
 
@@ -365,9 +378,11 @@ close(): Promise<void>
 - **`host__view_media` 条件注入**（机械判断）：
   - 模型 `chat.output` 包含媒体模态；
   - 模型 `chat.input` 包含同一媒体模态（否则模型看不了）；
+  - 只要存在任一“输入 ∩ 输出”的媒体模态（image / audio / video）就注入；
   - Provider 支持工具调用，且模型 `chat.tools` 不为 `false`；
   - 因此“多媒体 → 文本”“文本 → 多媒体”“纯文本”都不会注册该工具；
 - `host__view_media` 的参数就是 `contentHash`；Session 校验它必须出现在当前会话的 assistant 消息中，不能读取任意附件；
+- Session 还会解析附件的实际模态，只允许回放当前模型“输入 ∩ 输出”都支持的媒体；不支持时返回工具错误结果，不把媒体发给 Provider；
 - **tool 媒体出站**：
   - 当前轮的 tool 附件会转换成 synthetic user 消息（主流 chat 协议不接受 tool 媒体）；
   - 历史 tool 附件会被剥离，避免每轮重复上传/发送；
@@ -453,8 +468,8 @@ PendingAttachment (bytes / url / remote-id)
   - `QwenImageProvider` 走 DashScope 原生 `POST /api/v1/services/aigc/multimodal-generation/generation`，返回 `GeneratedMedia[]`；不经过 Session，也不伪装成对话模型；
   - **会话级“边聊边画”暂缓**：Qwen 官方网页看起来是 host/MCP 工具编排（对话模型 + qwen-image 3.0），不是单模型能力；如果后续实现，应由 host tool 调用 `QwenImageProvider`，而不是把生图模型塞进 chat 路由；
   - 默认对话模型：`qwen-plus`；生图模型默认：`qwen-image-2.0`；
-  - **音频/视频输入已实现**：Adapter 生成 `input_audio` / `video_url` 内容块；`QwenCloudFileManager` 接受图片/音频/视频并校验格式与 base64 <10MB；Session 按模型 `limits` 校验 MIME、编码后大小和数量；
-  - `/upload` 支持图片/音频/视频扩展名，并在上传前按当前模型能力拒绝不支持的模态；
+  - **音频/视频输入已实现**：Adapter 生成 `input_audio` / `video_url` 内容块；`QwenCloudFileManager` 接受图片/音频/视频并校验格式与 base64 <10MB；Session 按模型 `limits` + Provider 默认限制校验 MIME、编码后大小、数量和时长；
+  - `/upload` 支持图片/音频/视频扩展名，并在上传前按当前模型能力与限制拒绝不支持的模态、编码超限或时长超限；
   - Omni 音频输出暂未实现；
   - 实机验证：文本对话、`qwen3-vl-plus` 图片理解；独立 `QwenImageProvider` 实机验证通过（`qwen-image-2.0`，约 937KB PNG）。
 
@@ -470,8 +485,9 @@ PendingAttachment (bytes / url / remote-id)
 ### 限制
 
 - Chat 输入支持图片（所有视觉 Provider）以及音频/视频（Qwen Omni）；音频/视频只在 Qwen 实现了协议编码；
-- 模型级媒体限制：MIME 白名单、原始字节、base64 编码后大小、数量；时长限制字段已预留，暂未从媒体文件解析时长；
-- Session 只读取已加载的模型目录；显式指定模型但宿主未调用 `initModels()` 时，模型能力/限制校验会跳过（Provider 仍会拒绝不支持的请求）；宿主应先初始化模型目录或注入覆盖；
+- 模型级媒体限制：MIME 白名单、原始字节、base64 编码后大小、数量、时长；时长从常见容器元数据解析，无法确定且模型要求时长上限时严格拒绝；
+- 当前时长解析覆盖 WAV / MP3 / AAC(ADTS) / AMR / AMR-WB、MP4 / MOV / 3GP、WebM / MKV、AVI、FLV、WMV(ASF)；Ogg 等未覆盖容器在模型声明 `maxDurationSeconds` 时会按“无法确定时长”拒绝；
+- Session 只读取已加载的模型目录；显式指定模型但宿主未调用 `initModels()` 时，模型能力校验会跳过，但 `defaultModelLimits` 中的媒体限制仍会执行（Provider 仍会拒绝不支持的请求）；宿主应先初始化模型目录或注入覆盖；
 - DeepSeek 单文件上限 64 MiB；
 - 上传/校验失败视为发送失败；
 - 路径恢复只在宿主元数据仍存在、且至少一个原始路径可读时有效；
@@ -565,7 +581,7 @@ new DeepSeekProvider({
   - 前端通过 `session.respondUserInput(...)` 提交答案，答案以 ToolMessage 返回模型；
   - 默认开启，可用 `run(..., { enableUserInput: false })` 关闭；不支持工具调用的 Provider 不会被注入。
 - host 内置工具 `host__view_media`（assistant 历史媒体回看）：
-  - 只在“模型可接收媒体 + 可产出媒体 + 支持工具调用”时注入；
+  - 只在“模型可接收媒体 + 可产出同一媒体模态 + 支持工具调用”时注入，覆盖 image / audio / video；
   - 参数 `contentHash` 来自 assistant 消息中的 `[media:<contentHash>]` 标记；
   - 工具结果携带 attachment，由 Session 重新 `ensureFile` 后发送给模型；
   - 只允许当前会话 assistant 消息中出现过的媒体，不读取任意附件。

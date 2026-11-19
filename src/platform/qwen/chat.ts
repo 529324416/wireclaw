@@ -5,7 +5,7 @@ import { SessionError, SessionErrorType } from "../../session/error";
 import { detectMediaMimeType, mediaModalityFromMimeType } from "../../session/media";
 import type { Message } from "../../session/message";
 import { CloudFileManager, ModelProvider } from "../../session/protocol";
-import type { ModelInfo } from "../../session/protocol";
+import type { ModelInfo, ModelLimits } from "../../session/protocol";
 import type {
     ChatOptions,
     ChatResult,
@@ -266,6 +266,9 @@ export class QwenChatProvider extends OpenAICompatibleProvider {
 
     override get cloudFileManager(): QwenCloudFileManager{ return this._qwenCloudFileManager; }
 
+    /** 模型目录未加载时也执行 Qwen 内联媒体的 10MB 编码上限 */
+    override get defaultModelLimits(): ModelLimits{ return QWEN_DEFAULT_MEDIA_INPUT_LIMITS; }
+
     override async resolveDefaultModel(): Promise<string | undefined>{
         const models = this._qwenModelProvider.availableModels
             ?? await this._qwenModelProvider.initModels();
@@ -371,6 +374,24 @@ const QWEN_VIDEO_MIME_TYPES = new Set([
     "video/x-flv",
     "video/x-ms-wmv",
 ]);
+
+/** 模型目录未加载或模型未声明 limits 时的 Qwen 兜底限制
+ * @note Qwen CloudFileManager 仍会再做一次同样上限的校验，形成双保险
+ */
+const QWEN_DEFAULT_MEDIA_INPUT_LIMITS: ModelLimits = {
+    input: {
+        audio: {
+            maxEncodedBytes: QWEN_MAX_INLINE_ENCODED_BYTES,
+            mimeTypes: [...QWEN_AUDIO_MIME_TYPES],
+            allowedTransports: ["inline"],
+        },
+        video: {
+            maxEncodedBytes: QWEN_MAX_INLINE_ENCODED_BYTES,
+            mimeTypes: [...QWEN_VIDEO_MIME_TYPES, "video/avi"],
+            allowedTransports: ["inline"],
+        },
+    },
+};
 
 function normalizeMimeType(value: string | undefined): string | undefined{
     if (value === undefined) return undefined;
