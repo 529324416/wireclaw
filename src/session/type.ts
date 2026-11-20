@@ -165,6 +165,9 @@ export type ToolCallResult = {
     /** 结构化内容，UI/Harness使用的结构化数据 */
     structuredContent?: object;
 
+    /** 工具产出的待落盘媒体；由 Session 在工具执行后写入附件系统 */
+    attachments?: readonly PendingAttachment[];
+
     /** 原始数据 */
     raw?: unknown;
 }
@@ -285,6 +288,9 @@ export const SessionEventType = {
     /** 工具调用进度（超过延迟阈值后才会发出） */
     TOOL_PROGRESS: 'tool_progress',
 
+    /** 工具产出媒体（已落盘，携带 AttachmentRef） */
+    TOOL_ATTACHMENT: 'tool_attachment',
+
     /** 工具请求人工输入（会话进入暂停状态） */
     TOOL_INPUT_REQUIRED: 'tool_input_required',
 
@@ -324,6 +330,7 @@ export type SessionEvent =
     | { type: typeof SessionEventType.TOOL_CALL_START, call: ToolCall }
     | { type: typeof SessionEventType.TOOL_CALL_END, call: ToolCall, result: ToolCallResult }
     | { type: typeof SessionEventType.TOOL_PROGRESS, call: ToolCall, progress: ToolProgress }
+    | { type: typeof SessionEventType.TOOL_ATTACHMENT, call: ToolCall, attachment: AttachmentRef, name?: string, mimeType?: string }
     | { type: typeof SessionEventType.TOOL_INPUT_REQUIRED, call: ToolCall, request: UserInputRequest }
     | { type: typeof SessionEventType.TOOL_APPROVAL_REQUIRED, call: ToolCall, tool: ToolDefinition | null }
     | { type: typeof SessionEventType.TOOL_PERMISSION_WARNING, call: ToolCall, tool: ToolDefinition | null, message: string }

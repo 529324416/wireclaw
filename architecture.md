@@ -13,6 +13,8 @@
 - 工具审批暂停与恢复（`resume`）
 - 本地工具与 MCP stdio（由参考客户端 `src/client` / `wireclaw/client` 提供；核心包只保留契约与 HTTP 传输）
 - MCP 工具客户端（HTTP 核心，stdio 可注入）
+- 工具多模态结果接入附件系统（`ToolCallResult.attachments` / `TOOL_ATTACHMENT`；MCP image/audio/resource）
+- 本地 ComfyUI Qwen-Image 2.1 生图工具（API 工作流、参考图上传、seed / negative_prompt）
 - 媒体附件（内容指纹 + 本地/OPFS/IndexedDB 文件宿主；原始路径恢复；Ollama 以 inline base64 发送）
 - DeepSeek（Chat Completions + Files API，支持 `file_id` 上传复用）
 - 多 Provider 切换（Ollama / DeepSeek / MiniMax / Qwen）
@@ -44,6 +46,8 @@ src/
     mcp/         type / error / transport / http / client / naming / provider
   client/        Node-only 参考客户端实现（不进入核心/浏览器入口）
                  LocalToolProvider / MCP stdio / createMcpProvider / Qwen 参考覆盖表
+tools/           临时测试工具（MiniMax H3 / ComfyUI 生图与修图；不随 npm 包分发）
+examples/        示例 MCP Server 与 ComfyUI API 工作流
 ```
 
 依赖方向是单向的：
@@ -120,8 +124,12 @@ limits?: {
 - Wireclaw 只从模型 API 读取能力；不做内置探测/问模型/静态推断；
 - API 不返回模态的平台，默认按文本能力处理；
 - 宿主可以用 `AIProvider.overwrite(modelId, info)` / `overwriteMany([...])` 注入自己探测到的能力；
+- 宿主覆盖是唯一事实源：模型目录未加载时也能直接读取覆盖数据；覆盖错误由后续 Provider 请求正常报错；
+- 模型目录未加载且当前模型没有覆盖时，`Session.run` 会自动调用 `ModelProvider.initModels()` 兜底；初始化失败按“模型不接受媒体输入”处理，不阻塞纯文本对话；
 - `ModelProvider` 负责合并覆盖并归一化，覆盖可以在模型列表加载前或加载后调用；
 - `src/client/qwen-models.ts` 是参考 harness 的 Qwen 覆盖表，不是核心探测逻辑，宿主可以整体替换。
+- 参考 harness 的 `client.ts` 还支持本地 `modelOverwrite.json`（`WIRECLAW_MODEL_OVERWRITE_FILE`）：文件条目按 `Partial<ModelInfo>` 书写，在 Provider 模型目录初始化后与默认 `ModelInfo` 深度合并；文件未出现的字段保留初始化默认值。支持数组和 `{ modelId: info }` 两种格式，也兼容 `isVisionModel` 等派生 bool 字段。
+- `modelOverwrite.json` 只覆盖当前 Provider 目录中已存在的模型；它是宿主侧静态配置，不进入核心包。请把 `modelOverwrite.example.json` 复制为 `modelOverwrite.json` 后使用；默认文件已被 git 忽略。
 
 ### 平台共享层（platform/shared）
 
@@ -232,6 +240,13 @@ npx tsx client.ts
 | `MINIMAX_API_KEY_FILE` | `./apikey-minimax-h3.txt` | MiniMax API key 文件 |
 | `MINIMAX_BASE_URL` | `https://api.minimax.cn` | MiniMax API 地址 |
 | `MINIMAX_MODEL` | `MiniMax-M3.1-Flash` | MiniMax Chat 默认模型 |
+| `COMFYUI_BASE_URL` | `http://127.0.0.1:8188` | ComfyUI API 地址 |
+| `WIRECLAW_COMFYUI_WORKFLOW` | `./examples/comfyui/qwen-image-2.1-t2i.json` | ComfyUI 生图 API 工作流 JSON |
+| `WIRECLAW_COMFYUI_EDIT_WORKFLOW` | `./examples/comfyui/qwen-image-2.1-image-edit.json` | ComfyUI 修图 API 工作流 JSON |
+| `WIRECLAW_COMFYUI_TIMEOUT_MS` | `600000` | 单次生成总超时 |
+| `WIRECLAW_COMFYUI_IMAGE_TOOL` | 未设置 | 设为 `0` 时不注册 ComfyUI 生图工具 |
+| `WIRECLAW_COMFYUI_EDIT_TOOL` | 未设置 | 设为 `0` 时不注册 ComfyUI 修图工具 |
+| `WIRECLAW_MODEL_OVERWRITE_FILE` | `./modelOverwrite.json` | 本地模型静态能力覆盖文件 |
 | `DASHSCOPE_API_KEY` | 未设置 | 直接指定 Qwen API key（优先于文件） |
 | `QWEN_API_KEY_FILE` | `./apikey-qwen.txt` | Qwen API key 文件 |
 | `QWEN_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Qwen OpenAI 兼容入口 |
@@ -352,10 +367,14 @@ close(): Promise<void>
 
 - `AIProvider.supportsAttachmentInput`：是否能把会话附件转换为 Provider 可用表示（上传 / 内联）；默认由 `cloudFileManager` 是否存在推导。
 - `AIProvider.supportsMediaOutput`：chat 是否可能返回媒体；默认 `false`。当前没有 chat provider 声明 `true`；生图能力由独立的 `GenerationCapability` 提供。
-- `AIProvider.resolveModelCapabilities(model)`：只读取已加载的模型列表，不主动发网络请求；列表已经由 `ModelProvider` 归一化并合并外部覆盖。模型未加载或未命中时返回 `undefined`，Session 退化为 Provider 级判断。
+- `AIProvider.resolveModelCapabilities(model)`：读取已加载的模型列表或宿主覆盖；不主动发网络请求。模型未加载或未命中时返回 `undefined`，Session 退化为 Provider 级判断。
 - 宿主可以通过 `AIProvider.overwrite` / `overwriteMany` 注入自己探测到的模型能力；Wireclaw 核心不做额外探测。
 - Session 发送前按附件 MIME 推导模态：`image/*`、`audio/*`、`video/*`；如果模型 `chat.input` 已声明且不包含该模态，直接失败，不触发上传。非媒体附件（如 `text/plain`）不参与模态校验，交由具体 Provider 判断。
 - 模型能力约束的是“输入模态”和“输出声明”；输出媒体由 Provider 实际返回，再由 Session 落盘。
+- **两个模态集合语义不同**：
+  - `viewableModalities`：模型 `chat.input` 中的媒体模态，表示模型能接收哪些媒体输入；用于当前轮 tool 媒体出站。
+  - `selfViewableModalities`：`chat.input ∩ chat.output`，表示模型自己的产出能否回看；只用于 `host__view_media`。
+  - 典型“图片输入 + 文本输出”模型：`viewableModalities = ["image"]`，`selfViewableModalities = []`；tool 图片能回传，但 assistant 历史图片不注入 `host__view_media`。
 - `AIProvider.defaultModelLimits`：Provider 级媒体输入默认限制。模型目录尚未加载、或模型 `limits` 未声明某个模态时，Session 用它兜底；模型级限制按模态覆盖同名字段。
 - 所有附件引用只保存 `contentHash`；真实字节只存在于 `IFileHost`。同一文件可以被多个会话引用，也可以在同一个会话中被多次引用。
 
@@ -370,6 +389,21 @@ close(): Promise<void>
 - 如果模型声明 `maxDurationSeconds` 但无法确定时长，按 `UnsupportedMediaFormat` 拒绝；确定但超限按 `InputLimitExceeded` 拒绝。
 - Qwen 的 10MB base64 编码上限通过 `QwenChatProvider.defaultModelLimits` 前移到 Session，模型目录未初始化时也会生效；`QwenCloudFileManager` 仍保留同样上限作为双保险。
 
+### tool 多模态结果落盘与回传
+
+- `ToolCallResult.attachments`（`PendingAttachment[]`）是工具产出媒体的统一出口；工具 Provider 不接触 `IFileHost`。
+- Session 在工具执行完成后、生成 `ToolMessage` 之前调用 `AttachmentIngestor` 落盘：
+  - 成功后把 `AttachmentRef` 追加到工具结果内容，并发 `TOOL_ATTACHMENT` 事件；
+  - 落盘失败（包括 Session 没有 `AttachmentFileManager`）视为该工具调用失败，保留错误文本并继续运行；
+  - 无 `AttachmentFileManager` 的 Session 无法承载工具媒体，这是宿主显式省略附件存储的情况。
+- 当前轮 tool 附件在发送给 Provider 前转换成 synthetic user 消息，并附带 `[media:<contentHash>]` 标记；历史 tool 附件不再发送字节，只保留 `[tool media reference: <contentHash>]` 文本，供参考图工具引用。
+- 用户消息中的附件在发送给模型时保留图片内容，并附带 `[media:<contentHash>]` 文本标记，模型可把该 hash 传给参考图工具。
+- 出站按 `viewableModalities`（模型媒体输入）逐附件过滤：
+  - 模型不支持的模态不会发给 Provider，只留下省略说明；
+  - 模型能力未知时一律按“不支持媒体输入”处理，避免无意义的媒体 token 消耗。
+- MCP `tools/call` 结果中的 `image` / `audio` / `resource.blob` / http(s) `resource_link` 会映射为 `PendingAttachment`；`text` 与 resource text 保持文本；`isError` 结果不落盘媒体。
+- 工具媒体默认只对当前轮模型可见；assistant 自身媒体的回放策略见下一节。
+
 ### assistant 媒体回放与回看
 
 - 历史与 UI 始终保留 `AttachmentRef`，Provider 返回的媒体不会丢；
@@ -378,15 +412,11 @@ close(): Promise<void>
 - **`host__view_media` 条件注入**（机械判断）：
   - 模型 `chat.output` 包含媒体模态；
   - 模型 `chat.input` 包含同一媒体模态（否则模型看不了）；
-  - 只要存在任一“输入 ∩ 输出”的媒体模态（image / audio / video）就注入；
+  - `selfViewableModalities` 中存在任一“输入 ∩ 输出”的媒体模态（image / audio / video）就注入；
   - Provider 支持工具调用，且模型 `chat.tools` 不为 `false`；
   - 因此“多媒体 → 文本”“文本 → 多媒体”“纯文本”都不会注册该工具；
 - `host__view_media` 的参数就是 `contentHash`；Session 校验它必须出现在当前会话的 assistant 消息中，不能读取任意附件；
-- Session 还会解析附件的实际模态，只允许回放当前模型“输入 ∩ 输出”都支持的媒体；不支持时返回工具错误结果，不把媒体发给 Provider；
-- **tool 媒体出站**：
-  - 当前轮的 tool 附件会转换成 synthetic user 消息（主流 chat 协议不接受 tool 媒体）；
-  - 历史 tool 附件会被剥离，避免每轮重复上传/发送；
-  - MCP 媒体接入后复用同一条链路；
+- Session 还会解析附件的实际模态，只允许回放 `selfViewableModalities` 中的媒体；不支持时返回工具错误结果，不把媒体发给 Provider；
 - assistant 媒体默认不自动回放；模型需要时通过 `host__view_media` 主动回看。
 
 ### Chat 输出媒体落盘
@@ -433,12 +463,24 @@ PendingAttachment (bytes / url / remote-id)
   - 同一 `contentHash` 并发 ensure 使用 single-flight。
 - **MiniMax H3-Image**
   - 只实现 `GenerationCapability`，不实现 `ChatCapability`；
-  - `POST /v1/images/generations`，模型 `MiniMax-H3-Image`；
+  - 文生图 `POST /v1/images/generations`，图片编辑 `POST /v1/images/edits`，模型 `MiniMax-H3-Image`；
   - 支持 `response_format: "url"` 与 `"b64_json"`；
+  - 支持 `seed`（复现随机种子）与 `negative_prompt`（负向提示词）；已在 `api.minimax.cn` 实测接口返回 200，Provider 会原样透传；
   - 默认 `area: "1K"`、`n: 1`、`output_format: "png"`，服务端超时默认 600s；
   - `ModelInfo.capabilities.generate.image = true`，`chat` 为空；
   - 结果返回 `GeneratedMedia[]`，由生成运行时或宿主交给 `AttachmentIngestor`；
-  - 实机测试发现平台可能省略/错报 `output_format`，落盘时以文件头识别结果为准，并同步修正扩展名。
+  - 实机测试发现平台可能省略/错报 `output_format`，落盘时以文件头识别结果为准，并同步修正扩展名；
+  - `size` 参数使用 `WIDTHxHEIGHT`（例如 `1024x1024`），不是 `1024*1024`；
+  - **参考图编辑**：
+    - 支持 1~16 张参考图；通过 `images[].image_url` 传入公网 URL、`mm_file://{file_id}` 或 `data:image/...;base64,...` Data URI；
+    - 请求体总大小 ≤64 MiB（base64 约为原文件 4/3）；Provider 会在发送前校验图片格式、数量和编码后大小；
+    - `GenerationRequest.referenceFiles` 传已解析的 `AttachmentFile[]`，`referenceUrls` 传 URL/Data URI；有参考图时自动走 `/v1/images/edits`；
+    - 参考图编辑的 `ModelInfo.capabilities.generate.input` 声明为 `["text", "image"]`；
+  - **作为多模态产出 Tool**：
+    - 本地参考包装 `tools/minimax-image-tool.ts`（`MiniMaxImageToolProvider` / `createMiniMaxImageToolProvider`，临时测试工具，不随 npm 包分发），默认 `adviceTimeout = 600_000ms`，优先使用 `response_format: "b64_json"`；
+    - Tool 参数从 `prompt` 扩展为 `prompt + optional references/seed/negative_prompt`；`references` 支持会话附件 `contentHash`（来自 `[media:<contentHash>]` 或 `[tool media reference: <contentHash>]`）或 http(s)/data:image URL；
+    - MCP Server 示例 `examples/mcp_minimax_image_server.py` 同步支持 `references`（URL/Data URI），返回 `text + image` 内容块，由客户端统一落盘并回传模型；
+    - 两者都只产出 `ToolCallResult.attachments`，不直接接触宿主文件系统。
 - **MiniMax H3 Video**
   - 只实现 `GenerationCapability`，返回异步 `GenerationTask`；
   - `POST /v2/video_generation` 创建任务，`GET /v2/query/video_generation/{task_id}` 轮询；
@@ -495,7 +537,7 @@ PendingAttachment (bytes / url / remote-id)
 - assistant 媒体默认不回放，只保留在历史/UI；
 - MiniMax Chat 暂不支持输入附件；
 - Qwen Omni 音频输出未实现；
-- MCP 的 image/audio/resource 仍暂时转为文本占位，尚未接入附件系统。
+- MCP 的 image/audio/resource 已接入附件系统；非媒体 resource 会落盘但不会作为模型媒体输入发送。
 
 ## DeepSeek 实现（platform/deepseek.ts）
 
@@ -660,6 +702,12 @@ MCP 工具名没有字符集限制，而模型侧只接受 `[A-Za-z0-9_-]`，且
 - 超长：截断 + 8 位哈希
 - `title` 保留 MCP 原始名，便于 UI 展示
 
+### 工具超时
+
+- Wireclaw 扩展 MCP 工具定义字段 `adviceTimeout`（毫秒），映射到 `ToolDefinition.adviceTimeout`；
+- `McpServerConfig.adviceTimeoutMs` 可为所有工具提供默认建议超时，单个工具的 `adviceTimeout` 优先；
+- 解析后会限制在 1h 以内；生成类工具（如 MiniMax H3-Image）应显式设置 600s 级超时，避免 Session 默认 30s 截断。
+
 ### 审批策略
 
 默认 `approval: "auto"`：
@@ -681,7 +729,12 @@ MCP 工具名没有字符集限制，而模型侧只接受 `[A-Za-z0-9_-]`，且
 | MCP | Wireclaw |
 |---|---|
 | `content[].type === "text"` | 拼接为文本 |
-| `image` / `audio` / `resource` | 暂转文本占位（尚未接入 IFileHost，后续升级） |
+| `image` / `audio` | base64 → `PendingAttachment(bytes)`，由 Session 落盘 |
+| `resource.blob` | base64 → `PendingAttachment(bytes)`（所有资源都落盘，模型按媒体输入过滤） |
+| `resource.text` | 文本 |
+| `resource_link`（http/https） | URL 附件，由 `AttachmentIngestor` 下载/校验/落盘 |
+| `resource_link`（其他协议） | 文本占位 |
+| `isError: true` 的媒体内容 | 不落盘，只保留错误文本 |
 | `structuredContent` | `ToolCallResult.structuredContent` |
 | `isError: true` | `isSuccess = false` + `ToolError(ProviderError)` |
 | JSON-RPC error | `ToolError(ProviderError)` |
@@ -726,10 +779,32 @@ await registry.closeAll();
 ### 已知限制
 
 - HTTP 通知流依赖服务端支持 GET SSE；不支持时会自动降级，业务侧仍可用 `toolCacheTtlMs` 定期刷新工具列表。
-- 非文本内容暂转文本占位。
+- 工具媒体默认只回传当前轮；历史 tool 媒体会被剥离，暂不支持后续回看。
+- MCP `resources/list` / `resources/read` 协议尚未实现；本轮只处理 `tools/call` 结果中的 embedded resource。
+- `resource_link` 仅支持 http/https；`file://` 等协议保留文本占位。
 - 仅支持静态请求头鉴权，未实现 OAuth。
 - stdio 传输由 `src/client` 提供，已通过实机联调（Python 子进程）。
 - 更多待办见根目录 `todo.md`。
+
+## ComfyUI Qwen-Image Tool
+
+- 临时测试工具位于根目录 `tools/`，不属于 `wireclaw/client` 包入口，也不会随 npm 包分发。
+- 实现：`tools/comfyui-image-tool.ts` 的 `ComfyUIImageToolProvider`（生图）与 `tools/comfyui-image-edit-tool.ts` 的 `ComfyUIImageEditToolProvider`（修图，强制至少 1 张参考图）；CLI 默认同时注册两者。
+- 输入是 ComfyUI 导出的 API 格式工作流；Provider 自动定位：
+  - `TextEncodeQwenImage21`：写入 `prompt` / `negative_prompt`
+  - `EmptyLatentImage`：写入 `width` / `height`
+  - `KSampler`：写入 `seed`（未提供时随机）
+- Tool 参数与 MiniMax 版本对齐：`prompt` / `size` / `references` / `seed` / `negative_prompt`。
+- 参考图：
+  - `contentHash` 通过 `resolveReference` 从会话附件读取，URL/Data URI 直接下载/解码；
+  - 通过 `POST /upload/image` 上传到 ComfyUI，再接到 `images.image_1` ... `images.image_16`；
+  - 无参考图时移除 `images.*` 输入，按纯文生图执行；
+  - 优先复用工作流已有的 `images.image_N` 槽位（`ImageScaleToTotalPixels` + `LoadImage`）；单槽位与 16 槽位工作流都支持；
+  - 工作流没有对应槽位时，动态创建 `LoadImage` + `ImageScaleToTotalPixels` 节点。
+- 生成流程：`POST /prompt` -> 轮询 `GET /history/{prompt_id}` -> `GET /view` 下载输出 -> `PendingAttachment`。
+- 默认工作流示例：`examples/comfyui/qwen-image-2.1-t2i.json`（生图）与 `examples/comfyui/qwen-image-2.1-image-edit.json`（修图，已清理为可参数化版本）。
+- 修图工具必须提供至少 1 张参考图；在提供 `size` 时会把工作流的 `ComfySwitchNode` 切到 `EmptyLatentImage`，让尺寸生效；不提供时沿用参考图 latent 尺寸。
+- 已实机验证：无参考图生图、1 张参考图编辑、修图工作流、`size/seed/negative_prompt` 透传。
 
 ## Python + Flask 测试服务器
 
@@ -803,11 +878,25 @@ npx tsx test/shared-openai.ts
 npx tsx test/ollama-offline.ts
 npx tsx test/qwen.ts
 npx tsx test/media-input.ts
+npx tsx test/view-media.ts
+npx tsx test/tool-media.ts
+npx tsx test/mcp-media.ts
+npx tsx test/minimax-image-tool.ts
+npx tsx test/comfyui-image-tool.ts
+npx tsx test/comfyui-image-edit-tool.ts
+npx tsx test/model-overwrite.ts
 ```
 
 实机用例：
 
 ```bash
+python examples/mcp_minimax_image_server.py   # 端口默认 5001
+npx tsx test/tool-media-ollama-live.ts        # 本地 MiniMax H3 Tool + Ollama
+npx tsx test/minimax-image-reference-live.ts  # MiniMax H3-Image 参考图编辑
+npx tsx test/mcp-tool-media-ollama-live.ts    # MCP MiniMax H3 + Ollama
+npx tsx test/mcp-tool-media-deepseek-live.ts  # MCP MiniMax H3 + DeepSeek
+npx tsx test/tool-media-qwen-live.ts          # 本地 MiniMax H3 Tool + Qwen
+npx tsx test/comfyui-image-live.ts            # ComfyUI Qwen-Image 2.1 生图 + 参考图
 npx tsx test/ollama-protocol.ts
 npx tsx test/factory-live-deepseek.ts
 npx tsx test/qwen-live.ts

@@ -49,7 +49,7 @@ MCP 并不只是「跨进程提供工具」：
 - [ ] MCP `elicitation`（服务端发起的人工输入，复用 ask_user 表单机制）
 - [ ] 更完整的 JSON Schema 校验（`pattern` / `oneOf` / `$ref` 等）
 - [x] 用户图片附件（Ollama inline / DeepSeek Files API）
-- [ ] MCP 多模态结果接入附件系统，并作为输入回传模型（tool 生成的外部媒体；assistant 自身生成的媒体默认不回放）
+- [x] MCP 多模态结果接入附件系统，并作为输入回传模型（tool 生成的外部媒体；assistant 自身生成的媒体默认不回放）
 - [ ] `tasks` / 长任务
 - [x] 协议版本窗口：`2025-11-25` / `2025-06-18`，移除 `2024-11-05` 与旧版 HTTP+SSE
 - [ ] `2026-07-28` 无状态客户端评估（移除 initialize / session）
@@ -80,6 +80,16 @@ MCP 并不只是「跨进程提供工具」：
 - [x] Qwen 音频/视频输入实机测试（Session 链路 + 文本模型负向拒绝）
 - [x] Qwen-Image 独立 `GenerationCapability`（DashScope multimodal-generation）
 - [x] Qwen 实机测试（对话 / 图片理解；独立生图 Provider 实机验证）
+- [x] MiniMax H3 本地 ToolProvider 多模态产出包装（Ollama 实机）
+- [x] MiniMax H3-Image 参考图编辑（Tool 参数 + Provider + MCP Server）
+- [x] MiniMax H3-Image `seed` / `negative_prompt` 参数透传
+- [x] MiniMax H3 MCP Server 示例（Ollama / DeepSeek 实机）
+- [x] ComfyUI Qwen-Image 2.1 本地生图工具（替换 CLI MiniMax H3 注册，实机通过）
+- [x] ComfyUI 参考图槽位复用与 16 图上限（兼容单槽位/16 槽位工作流）
+- [x] ComfyUI 修图工具（必须参考图，独立修图工作流）
+- [x] MiniMax/ComfyUI 临时测试工具移出 `wireclaw/client`，放入根目录 `tools/`
+- [x] `modelOverwrite.json` 本地模型静态能力覆盖（ModelInfo 深度合并）
+- [x] Tool 多模态结果 Qwen 实机测试
 - [x] assistant 媒体回放策略：历史保留、默认不回传、统一写 `[media:<contentHash>]` 标记
 - [x] `host__view_media` 条件注入：按模型输入/输出媒体能力机械判断
 - [x] tool 媒体出站：当前轮转 synthetic user 消息，历史 tool 媒体剥离
@@ -124,7 +134,7 @@ MCP 并不只是「跨进程提供工具」：
 - [ ] 共享 Provider 下的上传取消语义与等待者隔离
 - [ ] 大文件流式读取/哈希/上传（当前主要在内存中处理）
 - [ ] 图片预处理：尺寸/EXIF/压缩、token 估算、单请求图片数量限制
-- [ ] MCP `image` / `audio` / `resource` 接入 `IFileHost`，替换文本占位
+- [x] MCP `image` / `audio` / `resource` 接入 `IFileHost`，替换文本占位
 - [x] Chat 输出媒体落盘入口（`ChatResult.attachments` / `ChatOptions.onAttachment` / `ASSISTANT_ATTACHMENT`；具体 Provider 待接）
 - [ ] 远端文件清理/删除策略、缓存持久化与重启重建
 - [ ] 恢复会话时的附件存在性校验与缺失文件 UX
@@ -148,5 +158,5 @@ MCP 并不只是「跨进程提供工具」：
 - 附件历史只保存 contentHash；Provider 切换后按新 Provider 重新解析。
 - 允许自由切换 AIProvider， Provider 实例与 CloudFileManager 缓存应复用。
 - DeepSeek 测试 key 仅本地使用，必须保持在 `.gitignore` 内。
-- 附件系统仍需补齐生命周期、错误类型、浏览器宿主和 MCP 多模态接入。
+- 附件系统仍需补齐生命周期、错误类型、浏览器宿主和更多 Provider 附件协议。
 - assistant 自己生成的媒体默认不回放；MCP/tool 生成的外部媒体才需要作为输入回传给模型。

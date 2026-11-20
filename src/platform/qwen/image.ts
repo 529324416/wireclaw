@@ -143,7 +143,9 @@ export class QwenImageProvider extends AIProvider implements GenerationCapabilit
                 `Qwen image only supports image generation, got "${request.modality}"`,
             );
         }
-        if (request.references !== undefined && request.references.length > 0){
+        if ((request.references?.length ?? 0) > 0
+            || (request.referenceFiles?.length ?? 0) > 0
+            || (request.referenceUrls?.length ?? 0) > 0){
             throw new SessionError(
                 SessionErrorType.InvalidRequest,
                 "Qwen image reference/editing is not implemented yet",

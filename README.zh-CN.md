@@ -168,6 +168,12 @@ registry.registerProvider(createMcpProvider({
 }));
 ```
 
+工具结果可以通过 `ToolCallResult.attachments` 携带媒体。`Session` 会把它们写入附件管理器，并在当前模型接受该媒体输入时，转换成下一轮的 synthetic user 消息。MCP 的 `image` / `audio` / `resource` 结果复用同一条链路。参考 MiniMax H3-Image 与 ComfyUI Qwen-Image 工具还支持可选的 `references`（会话 contentHash 或图片 URL）、`seed` 与 `negative_prompt`。
+
+参考 Node 客户端会注册两个本地 ComfyUI Qwen-Image 工具：`comfyui-image__generateImage` 与 `comfyui-edit__editImage`（后者必须提供至少 1 张参考图）。可通过 `COMFYUI_BASE_URL`、`WIRECLAW_COMFYUI_WORKFLOW` 与 `WIRECLAW_COMFYUI_EDIT_WORKFLOW` 指向其他实例/工作流。这些测试工具位于 `tools/`，不属于发布的 `wireclaw/client` 入口。
+
+参考客户端还支持从本地 `modelOverwrite.json`（可用 `WIRECLAW_MODEL_OVERWRITE_FILE` 改路径）合并模型静态能力；条目使用 `ModelInfo` 字段，在模型目录初始化后覆盖默认值，未提供的字段保留默认配置。请把 `modelOverwrite.example.json` 复制为 `modelOverwrite.json` 后再修改；默认文件已被 git 忽略。
+
 三档权限：
 
 ```ts

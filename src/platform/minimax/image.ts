@@ -1,4 +1,5 @@
-import { fromBase64, InvalidParameterError, uniqueId } from "../../base";
+import { fromBase64, InvalidParameterError, toBase64, uniqueId } from "../../base";
+import { detectImageMimeType, normalizeImageMimeType } from "../../file";
 import { SessionError, SessionErrorType } from "../../session/error";
 import { detectMediaMimeType, normalizeMediaName } from "../../session/media";
 import type { GeneratedMedia } from "../../session/media";
@@ -18,11 +19,17 @@ export const MINIMAX_H3_IMAGE_MODEL = "MiniMax-H3-Image";
 /** H3-Image 高速版模型名 */
 export const MINIMAX_H3_IMAGE_HIGHSPEED_MODEL = "MiniMax-H3-Image-Highspeed";
 
+/** H3-Image 图片编辑最多参考图数量 */
+export const MINIMAX_H3_IMAGE_MAX_REFERENCES = 16;
+
+/** H3-Image 参考图请求体上限（64 MiB，含 base64 编码） */
+const MINIMAX_H3_IMAGE_MAX_REFERENCE_BODY_BYTES = 64 * 1024 * 1024;
+
 /** H3-Image 的最小模型能力描述 */
 export const MINIMAX_H3_IMAGE_MODEL_INFO: ModelInfo = {
     id: MINIMAX_H3_IMAGE_MODEL,
     name: MINIMAX_H3_IMAGE_MODEL,
-    description: "MiniMax H3 text-to-image model",
+    description: "MiniMax H3 image generation / editing model",
     size: 0,
     supportCompletion: false,
     supportToolCall: false,
@@ -31,7 +38,7 @@ export const MINIMAX_H3_IMAGE_MODEL_INFO: ModelInfo = {
     isEmbeddingModel: false,
     capabilities: {
         generate: {
-            input: ["text"],
+            input: ["text", "image"],
             output: ["image"],
             image: true,
             audio: false,
@@ -119,7 +126,7 @@ export class MiniMaxH3ImageProvider extends AIProvider implements GenerationCapa
             name: this._model,
             capabilities: {
                 generate: {
-                    input: ["text"],
+                    input: ["text", "image"],
                     output: ["image"],
                     image: true,
                     audio: false,
@@ -140,20 +147,83 @@ export class MiniMaxH3ImageProvider extends AIProvider implements GenerationCapa
                 `MiniMax H3-Image only supports image generation, got "${request.modality}"`,
             );
         }
-        if (request.references !== undefined && request.references.length > 0) {
-            throw new InvalidParameterError(
-                "MiniMax H3-Image text-to-image currently does not support reference images",
-            );
+
+        const referenceImages = this._buildReferenceImages(request);
+        const payload = this._buildPayload(request);
+        if (referenceImages.length > 0) {
+            payload.images = referenceImages.map((imageUrl) => ({ image_url: imageUrl }));
         }
 
-        const payload = this._buildPayload(request);
-        const response = await this._request(payload, options.signal);
+        const path = referenceImages.length > 0
+            ? "/v1/images/edits"
+            : "/v1/images/generations";
+        const response = await this._request(payload, options.signal, path);
         const requestedFormat = typeof payload.output_format === "string"
             ? payload.output_format
             : "png";
         const media = this._parseResponse(response, requestedFormat);
 
         return new CompletedGenerationTask(response.id ?? uniqueId(), media);
+    }
+
+    /** 把已解析的文件/URL 参考图整理成 H3 images[] */
+    private _buildReferenceImages(request: GenerationRequest): string[] {
+        const files = request.referenceFiles ?? [];
+        const urls = request.referenceUrls ?? [];
+
+        if (request.references !== undefined
+            && request.references.length > 0
+            && files.length + urls.length === 0) {
+            throw new InvalidParameterError(
+                "MiniMax H3-Image reference content requires resolved referenceFiles or referenceUrls",
+            );
+        }
+
+        const total = files.length + urls.length;
+        if (total === 0) return [];
+        if (total > MINIMAX_H3_IMAGE_MAX_REFERENCES) {
+            throw new InvalidParameterError(
+                `MiniMax H3-Image supports at most ${MINIMAX_H3_IMAGE_MAX_REFERENCES} reference images`,
+            );
+        }
+
+        const images: string[] = [];
+        let encodedBytes = 0;
+
+        for (const file of files) {
+            const mimeType = detectImageMimeType(file.content)
+                ?? normalizeImageMimeType(file.mimeType);
+            if (mimeType === undefined) {
+                throw new InvalidParameterError(
+                    `MiniMax H3-Image reference "${file.name}" is not a supported image`,
+                );
+            }
+
+            const encodedLength = 4 * Math.ceil(file.size / 3);
+            encodedBytes += encodedLength;
+            if (encodedBytes > MINIMAX_H3_IMAGE_MAX_REFERENCE_BODY_BYTES) {
+                throw new InvalidParameterError(
+                    "MiniMax H3-Image reference request body exceeds 64 MiB",
+                );
+            }
+
+            images.push(`data:${mimeType};base64,${toBase64(file.content)}`);
+        }
+
+        for (const url of urls) {
+            if (!isSupportedReferenceUrl(url)) {
+                throw new InvalidParameterError(`Unsupported reference image URL: ${url.slice(0, 80)}`);
+            }
+            encodedBytes += url.length;
+            if (encodedBytes > MINIMAX_H3_IMAGE_MAX_REFERENCE_BODY_BYTES) {
+                throw new InvalidParameterError(
+                    "MiniMax H3-Image reference request body exceeds 64 MiB",
+                );
+            }
+            images.push(url);
+        }
+
+        return images;
     }
 
     private _buildPayload(request: GenerationRequest): Record<string, unknown> {
@@ -214,6 +284,12 @@ export class MiniMaxH3ImageProvider extends AIProvider implements GenerationCapa
             }
             payload.seed = parameters.seed;
         }
+        if (parameters.negative_prompt !== undefined) {
+            if (typeof parameters.negative_prompt !== "string") {
+                throw new InvalidParameterError("negative_prompt must be a string");
+            }
+            payload.negative_prompt = parameters.negative_prompt;
+        }
         if (parameters.aigc_watermark !== undefined) {
             if (typeof parameters.aigc_watermark !== "boolean") {
                 throw new InvalidParameterError("aigc_watermark must be a boolean");
@@ -227,6 +303,7 @@ export class MiniMaxH3ImageProvider extends AIProvider implements GenerationCapa
     private async _request(
         payload: Record<string, unknown>,
         signal: AbortSignal | undefined,
+        path: string = "/v1/images/generations",
     ): Promise<MiniMaxImageResponse> {
         if (this._fetch === undefined) {
             throw new SessionError(
@@ -248,7 +325,7 @@ export class MiniMaxH3ImageProvider extends AIProvider implements GenerationCapa
         try {
             let response: Response;
             try {
-                response = await this._fetch(`${this._baseUrl}/v1/images/generations`, {
+                response = await this._fetch(`${this._baseUrl}${path}`, {
                     method: "POST",
                     headers: {
                         "Content-Type": "application/json",
@@ -383,6 +460,16 @@ class CompletedGenerationTask implements GenerationTask {
 
     async wait(): Promise<readonly GeneratedMedia[]> {
         return this.result;
+    }
+}
+
+function isSupportedReferenceUrl(value: string): boolean {
+    if (value.startsWith("data:image/") || value.startsWith("mm_file://")) return true;
+    try {
+        const url = new URL(value);
+        return url.protocol === "http:" || url.protocol === "https:";
+    } catch {
+        return false;
     }
 }
 

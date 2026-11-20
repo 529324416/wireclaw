@@ -1,4 +1,7 @@
+import { fromBase64 } from "../../base";
+import { DEFAULT_ATTACHMENT_MAX_BYTES } from "../../session/attachment-ingestor";
 import { isToolError, ToolError, ToolErrorType } from "../../session/error";
+import type { PendingAttachment } from "../../session/media";
 import type { ToolCall, ToolCallResult, ToolDefinition, ToolParamSchema } from "../../session/type";
 import type { ToolCallOptions, ToolProvider } from "../../session/tool";
 import { McpClient } from "./client";
@@ -12,7 +15,13 @@ import {
 import { createToolNameMappings } from "./naming";
 import { isRecord } from "./type";
 import type { McpApprovalMode, McpServerConfig } from "./config";
-import type { McpCallToolResult, McpProgressNotification, McpTool, McpToolAnnotations } from "./type";
+import type {
+    McpCallToolResult,
+    McpContent,
+    McpProgressNotification,
+    McpTool,
+    McpToolAnnotations,
+} from "./type";
 import type { McpTransport } from "./transport";
 
 /**
@@ -21,7 +30,7 @@ import type { McpTransport } from "./transport";
  * - 工具名：MCP 原始名 -> 模型安全 id（见 naming.ts）
  * - 注解：readOnlyHint / destructiveHint 等直接透传
  * - 审批：approval=auto 时，非只读工具默认需要审批
- * - 结果：content 合并为文本，structuredContent / raw 保留
+ * - 结果：文本/结构化内容保留；image/audio/resource 转为待落盘附件
  */
 export class McpToolProvider implements ToolProvider {
 
@@ -118,7 +127,7 @@ export class McpToolProvider implements ToolProvider {
                 progressToken: options?.progressToken,
                 onProgress,
             });
-            return mapCallToolResult(result);
+            return mapCallToolResult(result, call);
         } catch (error) {
             // 工具调用不自动重试，避免重复副作用；只尝试重连以便后续调用
             if (error instanceof McpTransportError && options?.signal?.aborted !== true) {
@@ -158,6 +167,11 @@ export class McpToolProvider implements ToolProvider {
     }
 
     private _toDefinition(tool: McpTool, safeName: string): ToolDefinition {
+        const adviceTimeout = resolveAdviceTimeout(
+            tool.adviceTimeout,
+            this._config.adviceTimeoutMs,
+        );
+
         return {
             name: safeName,
             title: tool.title ?? tool.name,
@@ -166,6 +180,7 @@ export class McpToolProvider implements ToolProvider {
             ...(tool.outputSchema === undefined
                 ? {}
                 : { outputSchema: normalizeInputSchema(tool.outputSchema) }),
+            ...(adviceTimeout === undefined ? {} : { adviceTimeout }),
             annotations: {
                 readOnlyHint: tool.annotations?.readOnlyHint,
                 destructiveHint: tool.annotations?.destructiveHint,
@@ -195,6 +210,17 @@ export class McpToolProvider implements ToolProvider {
     }
 }
 
+function resolveAdviceTimeout(
+    toolValue: unknown,
+    configValue: number | undefined,
+): number | undefined {
+    const value = typeof toolValue === "number" && Number.isFinite(toolValue)
+        ? toolValue
+        : configValue;
+    if (value === undefined || !Number.isFinite(value) || value <= 0) return undefined;
+    return Math.min(Math.floor(value), 3_600_000);
+}
+
 function normalizeInputSchema(schema: Record<string, unknown> | undefined): ToolParamSchema {
     if (!isRecord(schema)) {
         return { type: "object", properties: {} };
@@ -211,10 +237,27 @@ function normalizeInputSchema(schema: Record<string, unknown> | undefined): Tool
     return normalized;
 }
 
-function mapCallToolResult(result: McpCallToolResult): ToolCallResult {
+function mapCallToolResult(result: McpCallToolResult, call: ToolCall): ToolCallResult {
     const parts = Array.isArray(result.content) ? result.content : [];
-    const text = parts.map(contentToText).filter((part) => part.length > 0).join("\n");
     const isSuccess = result.isError !== true;
+    const textParts: string[] = [];
+    const attachments: PendingAttachment[] = [];
+
+    if (isSuccess) {
+        for (const [index, part] of parts.entries()) {
+            const mapped = mapContentPart(part, call, index);
+            if (mapped.text !== undefined && mapped.text.length > 0) textParts.push(mapped.text);
+            if (mapped.attachment !== undefined) attachments.push(mapped.attachment);
+        }
+    } else {
+        // 错误结果只保留文本，避免把诊断媒体写入附件库
+        for (const part of parts) {
+            const text = contentToText(part);
+            if (text.length > 0) textParts.push(text);
+        }
+    }
+
+    const text = textParts.join("\n");
 
     return {
         content: text,
@@ -229,12 +272,97 @@ function mapCallToolResult(result: McpCallToolResult): ToolCallResult {
                     text.length > 0 ? text : "MCP tool returned an error",
                 ),
             },
+        ...(attachments.length > 0 ? { attachments } : {}),
         structuredContent: isRecord(result.structuredContent) ? result.structuredContent : undefined,
         raw: result,
     };
 }
 
-function contentToText(part: unknown): string {
+function mapContentPart(
+    part: unknown,
+    call: ToolCall,
+    index: number,
+): { text?: string; attachment?: PendingAttachment } {
+    if (!isRecord(part) || typeof part.type !== "string") return {};
+
+    switch (part.type) {
+        case "text":
+            return { text: typeof part.text === "string" ? part.text : "" };
+
+        case "image": {
+            if (typeof part.data !== "string" || part.data.length === 0) {
+                return { text: `[image ${typeof part.mimeType === "string" ? part.mimeType : "unknown"}]` };
+            }
+            return {
+                attachment: {
+                    kind: "bytes",
+                    name: `mcp-${call.name}-${index}`,
+                    mimeType: typeof part.mimeType === "string" ? part.mimeType : undefined,
+                    data: decodeMcpBase64(part.data, "MCP image"),
+                    origin: "tool",
+                },
+            };
+        }
+
+        case "audio": {
+            if (typeof part.data !== "string" || part.data.length === 0) {
+                return { text: `[audio ${typeof part.mimeType === "string" ? part.mimeType : "unknown"}]` };
+            }
+            return {
+                attachment: {
+                    kind: "bytes",
+                    name: `mcp-${call.name}-${index}`,
+                    mimeType: typeof part.mimeType === "string" ? part.mimeType : undefined,
+                    data: decodeMcpBase64(part.data, "MCP audio"),
+                    origin: "tool",
+                },
+            };
+        }
+
+        case "resource_link": {
+            const uri = typeof part.uri === "string" ? part.uri : undefined;
+            if (uri !== undefined && isHttpUrl(uri)) {
+                return {
+                    attachment: {
+                        kind: "url",
+                        url: uri,
+                        name: nameFromUri(uri),
+                        mimeType: typeof part.mimeType === "string" ? part.mimeType : undefined,
+                        origin: "tool",
+                    },
+                };
+            }
+            return { text: `[resource ${uri ?? "unknown"}]` };
+        }
+
+        case "resource": {
+            const resource = isRecord(part.resource) ? part.resource : {};
+            if (typeof resource.text === "string") return { text: resource.text };
+
+            const uri = typeof resource.uri === "string" ? resource.uri : undefined;
+            if (typeof resource.blob === "string" && resource.blob.length > 0) {
+                return {
+                    attachment: {
+                        kind: "bytes",
+                        name: nameFromUri(uri) ?? `mcp-resource-${index}`,
+                        mimeType: typeof resource.mimeType === "string"
+                            ? resource.mimeType
+                            : undefined,
+                        data: decodeMcpBase64(resource.blob, "MCP resource"),
+                        origin: "tool",
+                    },
+                };
+            }
+
+            return { text: `[resource ${uri ?? "unknown"}]` };
+        }
+
+        default:
+            return { text: `[unsupported content "${part.type}"]` };
+    }
+}
+
+function contentToText(part: McpContent | unknown): string {
     if (!isRecord(part) || typeof part.type !== "string") return "";
 
     switch (part.type) {
@@ -258,6 +386,48 @@ function contentToText(part: unknown): string {
 
         default:
             return `[unsupported content "${part.type}"]`;
+    }
+}
+
+function decodeMcpBase64(value: string, label: string): Uint8Array {
+    const maxBase64Length = Math.ceil(DEFAULT_ATTACHMENT_MAX_BYTES * 4 / 3) + 8;
+    if (value.length > maxBase64Length) {
+        throw new ToolError(
+            ToolErrorType.ProviderError,
+            false,
+            `${label} exceeds the ${DEFAULT_ATTACHMENT_MAX_BYTES} byte attachment limit`,
+        );
+    }
+
+    try {
+        return fromBase64(value);
+    } catch (error) {
+        throw new ToolError(
+            ToolErrorType.ProviderError,
+            false,
+            `Invalid ${label} base64 data`,
+            error,
+        );
+    }
+}
+
+function isHttpUrl(value: string): boolean {
+    try {
+        const url = new URL(value);
+        return url.protocol === "http:" || url.protocol === "https:";
+    } catch {
+        return false;
+    }
+}
+
+function nameFromUri(value: string | undefined): string | undefined {
+    if (value === undefined || value.length === 0) return undefined;
+    try {
+        const pathname = new URL(value).pathname;
+        const name = pathname.split("/").filter((part) => part.length > 0).pop();
+        return name === undefined || name.length === 0 ? undefined : decodeURIComponent(name);
+    } catch {
+        return undefined;
     }
 }
 

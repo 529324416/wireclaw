@@ -104,6 +104,10 @@ export type McpTool = {
     description?: string;
     inputSchema: Record<string, unknown>;
     outputSchema?: Record<string, unknown>;
+
+    /** Wireclaw 扩展：工具建议超时（毫秒）；服务端可返回，客户端会映射到 ToolDefinition */
+    adviceTimeout?: number;
+
     annotations?: McpToolAnnotations;
 };
 

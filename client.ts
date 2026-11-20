@@ -21,6 +21,14 @@ import {
     createMcpProvider,
     LocalToolProvider,
 } from "./src/client";
+import { ComfyUIImageToolProvider } from "./tools/comfyui-image-tool";
+import type { ComfyUIWorkflow } from "./tools/comfyui-image-tool";
+import { ComfyUIImageEditToolProvider } from "./tools/comfyui-image-edit-tool";
+import {
+    applyModelOverwrites,
+    loadModelOverwriteFile,
+} from "./tools/model-overwrite";
+import type { ModelOverwriteEntry } from "./tools/model-overwrite";
 import {
     AttachmentFileManager,
     DEFAULT_SESSION_PERMISSION,
@@ -64,6 +72,13 @@ import type {
  *   MINIMAX_API_KEY_FILE 默认 ./apikey-minimax-h3.txt
  *   MINIMAX_BASE_URL   默认 https://api.minimax.cn
  *   MINIMAX_MODEL      默认 MiniMax-M3.1-Flash
+ *   COMFYUI_BASE_URL   默认 http://127.0.0.1:8188
+ *   WIRECLAW_COMFYUI_WORKFLOW 默认 ./examples/comfyui/qwen-image-2.1-t2i.json
+ *   WIRECLAW_COMFYUI_EDIT_WORKFLOW 默认 ./examples/comfyui/qwen-image-2.1-image-edit.json
+ *   WIRECLAW_COMFYUI_TIMEOUT_MS 默认 600000
+ *   WIRECLAW_COMFYUI_IMAGE_TOOL 设为 0 时不注册 ComfyUI 生图工具
+ *   WIRECLAW_COMFYUI_EDIT_TOOL 设为 0 时不注册 ComfyUI 修图工具
+ *   WIRECLAW_MODEL_OVERWRITE_FILE 默认 ./modelOverwrite.json
  *   DASHSCOPE_API_KEY  直接指定 Qwen API key（优先于文件）
  *   QWEN_API_KEY_FILE  默认 ./apikey-qwen.txt
  *   QWEN_BASE_URL      默认 https://dashscope.aliyuncs.com/compatible-mode/v1
@@ -77,7 +92,7 @@ import type {
  *   /provider [providerId]               查看/切换 LLM Provider（ollama / deepseek / minimax / qwen）
  *   /model <model-name>                  切换当前 Provider 的模型
  *   /list_models                         列出当前 Provider 的可用模型及能力
- *   /tools                               列出当前可用的工具（含 MCP）
+ *   /tools                               列出当前可用的工具（含 MCP / 生图工具）
  *   /permission [readonly|approval|full] 查看/切换会话权限等级
  *   /upload <media-path>                 追加图片/音频/视频附件（按模型输入能力校验）
  *   /attachments                         列出会话附件并导出为 file:// 本地链接
@@ -127,6 +142,19 @@ const DEEPSEEK_API_KEY_FILE = process.env.DEEPSEEK_API_KEY_FILE ?? "./apikey-ds.
 const MINIMAX_BASE_URL = process.env.MINIMAX_BASE_URL ?? "https://api.minimax.cn";
 const MINIMAX_MODEL = process.env.MINIMAX_MODEL ?? "MiniMax-M3.1-Flash";
 const MINIMAX_API_KEY_FILE = process.env.MINIMAX_API_KEY_FILE ?? "./apikey-minimax-h3.txt";
+const COMFYUI_BASE_URL = process.env.COMFYUI_BASE_URL ?? "http://127.0.0.1:8188";
+const COMFYUI_WORKFLOW = process.env.WIRECLAW_COMFYUI_WORKFLOW
+    ?? "./examples/comfyui/qwen-image-2.1-t2i.json";
+const COMFYUI_EDIT_WORKFLOW = process.env.WIRECLAW_COMFYUI_EDIT_WORKFLOW
+    ?? "./examples/comfyui/qwen-image-2.1-image-edit.json";
+const COMFYUI_TIMEOUT_MS = Number(process.env.WIRECLAW_COMFYUI_TIMEOUT_MS ?? "600000");
+const COMFYUI_TIMEOUT = Number.isFinite(COMFYUI_TIMEOUT_MS) && COMFYUI_TIMEOUT_MS > 0
+    ? COMFYUI_TIMEOUT_MS
+    : 600_000;
+const COMFYUI_IMAGE_TOOL_DISABLED = process.env.WIRECLAW_COMFYUI_IMAGE_TOOL === "0";
+const COMFYUI_EDIT_TOOL_DISABLED = process.env.WIRECLAW_COMFYUI_EDIT_TOOL === "0";
+const MODEL_OVERWRITE_FILE = process.env.WIRECLAW_MODEL_OVERWRITE_FILE
+    ?? "./modelOverwrite.json";
 const QWEN_BASE_URL = process.env.QWEN_BASE_URL ?? QWEN_DEFAULT_BASE_URL;
 const QWEN_MODEL = process.env.QWEN_MODEL ?? QWEN_DEFAULT_CHAT_MODEL;
 const QWEN_API_KEY_FILE = process.env.QWEN_API_KEY_FILE ?? "./apikey-qwen.txt";
@@ -367,7 +395,7 @@ async function readQwenApiKey(): Promise<string> {
     return key;
 }
 
-async function createProvider(id: ProviderId): Promise<ProviderRuntime> {
+async function createProviderBase(id: ProviderId): Promise<ProviderRuntime> {
     switch (id) {
         case "ollama": {
             const provider = new OllamaProvider(BASE_URL);
@@ -431,6 +459,22 @@ async function createProvider(id: ProviderId): Promise<ProviderRuntime> {
     }
 }
 
+/** 本地 modelOverwrite.json；在 main 里读取一次 */
+let modelOverwrites: ModelOverwriteEntry[] = [];
+
+async function createProvider(id: ProviderId): Promise<ProviderRuntime> {
+    const runtime = await createProviderBase(id);
+    try {
+        const applied = await applyModelOverwrites(runtime.provider, modelOverwrites);
+        if (applied > 0) {
+            console.log(`[modelOverwrite] applied ${applied} model(s) for ${id}`);
+        }
+    } catch (error) {
+        console.log(`[modelOverwrite] ${id}: ${errorMessage(error)}`);
+    }
+    return runtime;
+}
+
 /** Provider 实例缓存：切换回来时复用同一个 AIProvider 与其 CloudFileManager 缓存 */
 const providerCache = new Map<ProviderId, Promise<ProviderRuntime>>();
 
@@ -476,6 +520,21 @@ async function resolveStartupProvider(): Promise<ProviderRuntime> {
 }
 
 async function main(): Promise<void> {
+    try {
+        const overwritePath = resolve(process.cwd(), sanitizePathInput(MODEL_OVERWRITE_FILE));
+        modelOverwrites = await loadModelOverwriteFile(overwritePath);
+        if (modelOverwrites.length > 0) {
+            console.log(`[modelOverwrite] loaded ${modelOverwrites.length} model(s) from ${overwritePath}`);
+        } else {
+            console.log(
+                `[modelOverwrite] not configured (${overwritePath} missing or empty); `
+                + "copy modelOverwrite.example.json to modelOverwrite.json",
+            );
+        }
+    } catch (error) {
+        console.log(`[modelOverwrite] skipped: ${errorMessage(error)}`);
+    }
+
     let currentProviderRuntime = await resolveStartupProvider();
     let currentModel = currentProviderRuntime.model;
 
@@ -496,6 +555,43 @@ async function main(): Promise<void> {
         },
     });
     registry.registerProvider(new LocalToolProvider(process.cwd(), { id: "local" }));
+
+    const imageTools: string[] = [];
+    if (!COMFYUI_IMAGE_TOOL_DISABLED) {
+        try {
+            const workflowPath = resolve(process.cwd(), sanitizePathInput(COMFYUI_WORKFLOW));
+            const workflow = JSON.parse(await readFile(workflowPath, "utf8")) as ComfyUIWorkflow;
+            if (registry.registerProvider(new ComfyUIImageToolProvider({
+                workflow,
+                baseUrl: COMFYUI_BASE_URL,
+                adviceTimeoutMs: 600_000,
+                timeoutMs: COMFYUI_TIMEOUT,
+                resolveReference: (contentHash) => attachmentManager.get(contentHash),
+            }))) {
+                imageTools.push("comfyui-image");
+            }
+        } catch (error) {
+            console.log(`[tools] ComfyUI image tool skipped: ${errorMessage(error)}`);
+        }
+    }
+
+    if (!COMFYUI_EDIT_TOOL_DISABLED) {
+        try {
+            const workflowPath = resolve(process.cwd(), sanitizePathInput(COMFYUI_EDIT_WORKFLOW));
+            const workflow = JSON.parse(await readFile(workflowPath, "utf8")) as ComfyUIWorkflow;
+            if (registry.registerProvider(new ComfyUIImageEditToolProvider({
+                workflow,
+                baseUrl: COMFYUI_BASE_URL,
+                adviceTimeoutMs: 600_000,
+                timeoutMs: COMFYUI_TIMEOUT,
+                resolveReference: (contentHash) => attachmentManager.get(contentHash),
+            }))) {
+                imageTools.push("comfyui-edit");
+            }
+        } catch (error) {
+            console.log(`[tools] ComfyUI edit tool skipped: ${errorMessage(error)}`);
+        }
+    }
 
     if (!MCP_DISABLED) {
         registry.registerProvider(createMcpProvider({
@@ -664,6 +760,25 @@ async function main(): Promise<void> {
                 break;
             }
 
+            case SessionEventType.TOOL_ATTACHMENT: {
+                process.stdout.write(
+                    `\n[tool attachment] ${event.name ?? event.attachment.contentHash}`
+                    + (event.mimeType !== undefined ? ` (${event.mimeType})` : "")
+                    + "\n",
+                );
+                void exportAttachmentFile(attachmentManager, event.attachment.contentHash)
+                    .then((media) => {
+                        if (media === undefined) return;
+                        process.stdout.write(`  ${media.url}\n`);
+                    })
+                    .catch((error: unknown) => {
+                        process.stderr.write(
+                            `[tool attachment] failed to export: ${errorMessage(error)}\n`,
+                        );
+                    });
+                break;
+            }
+
             case SessionEventType.TOOL_APPROVAL_REQUIRED:
                 void askApproval(event);
                 break;
@@ -716,6 +831,7 @@ async function main(): Promise<void> {
     console.log(`permission: ${permission}`);
     console.log(`workspace:  ${workspace}`);
     console.log(`files:      ${fileHost.rootDir}`);
+    console.log(`image tools: ${imageTools.length > 0 ? `${imageTools.join(", ")} (${COMFYUI_BASE_URL})` : "disabled"}`);
     console.log(`mcp:        ${MCP_DISABLED ? "disabled" : MCP_URL}`);
     console.log("commands:   /exit, /provider [id], /model <name>, /list_models, /tools, /permission [readonly|approval|full]");
     console.log("            /upload <media-path>, /attachments, /save_session [path], /restore_session [path]");

@@ -29,6 +29,9 @@ export type McpServerConfig = {
     /** 单次请求超时（毫秒） */
     requestTimeoutMs?: number;
 
+    /** 所有工具的建议超时（毫秒）；单个工具的 adviceTimeout 优先 */
+    adviceTimeoutMs?: number;
+
     /** 心跳间隔（毫秒），默认 30s；0 关闭 */
     heartbeatIntervalMs?: number;
 };

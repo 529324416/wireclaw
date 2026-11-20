@@ -1,0 +1,14 @@
+[
+  {
+    "id": "qwen4-max",
+    "capabilities": {
+      "chat": {
+        "input": ["text", "image"],
+        "output": ["text"],
+        "streaming": true,
+        "tools": true,
+        "thinking": false
+      }
+    }
+  }
+]

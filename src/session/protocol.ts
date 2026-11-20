@@ -384,6 +384,20 @@ export abstract class ModelProvider{
         }
     }
 
+    /** 该模型是否被宿主显式覆盖过能力 */
+    hasOverride(modelId: string): boolean{
+        return this._overrides.has(modelId);
+    }
+
+    /** 读取宿主覆盖的模型信息；模型目录未加载时也能使用
+     * @note 覆盖数据是宿主的唯一事实源；这里不主动拉取模型目录。
+     */
+    resolveOverride(modelId: string): ModelInfo | undefined{
+        const override = this._overrides.get(modelId);
+        if (override === undefined) return undefined;
+        return normalizeModelInfo(this._overrideToModel(modelId, override));
+    }
+
     /** 初始化模型/子类实现具体逻辑 */
     async initModels(onloaded?: (models: readonly ModelInfo[]) => void): Promise<readonly ModelInfo[]>{ 
 
@@ -446,28 +460,34 @@ export abstract class ModelProvider{
                 continue;
             }
 
-            const fallback: ModelInfo = {
-                id: modelId,
-                name: modelId,
-                description: "",
-                size: 0,
-                supportCompletion: false,
-                supportToolCall: false,
-                supportThink: false,
-                isVisionModel: false,
-                isEmbeddingModel: false,
-            };
-            const added = normalizeModelInfo({
-                ...fallback,
-                ...override,
-                id: modelId,
-                name: override.name ?? modelId,
-            });
+            const added = normalizeModelInfo(this._overrideToModel(modelId, override));
             indexById.set(modelId, result.length);
             result.push(added);
         }
 
         return result;
+    }
+
+    /** 把单条覆盖数据合成为独立 ModelInfo；用于目录未加载时的兜底 */
+    private _overrideToModel(modelId: string, override: Partial<ModelInfo>): ModelInfo{
+        const fallback: ModelInfo = {
+            id: modelId,
+            name: modelId,
+            description: "",
+            size: 0,
+            supportCompletion: false,
+            supportToolCall: false,
+            supportThink: false,
+            isVisionModel: false,
+            isEmbeddingModel: false,
+        };
+
+        return {
+            ...fallback,
+            ...override,
+            id: modelId,
+            name: override.name ?? modelId,
+        };
     }
 }
 
@@ -509,7 +529,16 @@ export type GenerationModality = "image" | "audio" | "video";
 export type GenerationRequest = {
     modality: GenerationModality;
     prompt: string;
+
+    /** 参考媒体的内容引用；Provider 需要字节时使用 referenceFiles */
     references?: readonly AttachmentRef[];
+
+    /** 已解析的参考图片；由宿主从 AttachmentFileManager 读取后注入 */
+    referenceFiles?: readonly AttachmentFile[];
+
+    /** 参考图片 URL：http(s) / data:image / mm_file 等平台支持的地址 */
+    referenceUrls?: readonly string[];
+
     context?: readonly Message[];
     parameters?: Record<string, unknown>;
 };
@@ -643,16 +672,21 @@ export abstract class AIProvider{
     }
 
     /** 解析指定模型的完整信息
-     * @note 只读取已加载的模型列表，不主动发起网络请求。
+     * @note 只读取已加载的模型列表或宿主覆盖数据，不主动发起网络请求。
+     *       模型目录未加载但宿主已 overwrite 时，优先返回覆盖数据。
      */
     async resolveModelInfo(model: string | undefined): Promise<ModelInfo | undefined>{
         const modelProvider = this.modelProvider;
         if (modelProvider === null || model === undefined || model.length === 0) return undefined;
 
         const models = modelProvider.availableModels;
-        if (models === null) return undefined;
+        if (models !== null){
+            const found = models.find((item) => item.id === model || item.name === model);
+            if (found !== undefined) return found;
+        }
 
-        return models.find((item) => item.id === model || item.name === model);
+        // 目录未加载（或目录中没有该模型）时，宿主覆盖是唯一事实源
+        return modelProvider.resolveOverride(model);
     }
 
     /** 解析指定模型的模型级能力

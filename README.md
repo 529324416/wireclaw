@@ -168,6 +168,12 @@ registry.registerProvider(createMcpProvider({
 }));
 ```
 
+Tool results can carry media through `ToolCallResult.attachments`. `Session` stores them in the attachment manager and, when the active model accepts that media input, forwards them as a synthetic user message for the next turn. MCP `image` / `audio` / `resource` results use the same pipeline. The reference MiniMax H3-Image and ComfyUI Qwen-Image tools also accept optional `references` (session `contentHash` or image URL), `seed`, and `negative_prompt`.
+
+The reference Node client registers two local ComfyUI Qwen-Image tools when their workflows exist: `comfyui-image__generateImage` and `comfyui-edit__editImage` (requires at least one reference image). Set `COMFYUI_BASE_URL`, `WIRECLAW_COMFYUI_WORKFLOW`, and `WIRECLAW_COMFYUI_EDIT_WORKFLOW` to point at another ComfyUI instance/workflow. These test tools live in `tools/` and are not part of the published `wireclaw/client` entry.
+
+The reference client can also merge local static model capabilities from `modelOverwrite.json` (override with `WIRECLAW_MODEL_OVERWRITE_FILE`). Entries use the `ModelInfo` shape and are merged over the initialized model catalog; omitted fields keep their defaults. Copy `modelOverwrite.example.json` to `modelOverwrite.json` and edit the copy; the default file is intentionally git-ignored.
+
 Permission levels:
 
 ```ts

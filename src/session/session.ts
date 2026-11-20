@@ -449,10 +449,13 @@ export type RunContext = {
     /** 是否允许模型调用 host__view_media 回看 assistant 历史媒体 */
     enableViewMedia: boolean;
 
-    /** 当前模型可接收的媒体模态；用于把 tool 媒体转换为 user 消息 */
+    /** 当前模型可接收的媒体输入；用于把当前轮 tool 媒体转换为 user 消息 */
     viewableModalities: readonly ModelModality[];
 
-    /** 解析附件的内容模态；用于 host__view_media 校验目标媒体是否可回放 */
+    /** 模型自己的产出中可回看的媒体模态（输入 ∩ 输出）；用于 host__view_media */
+    selfViewableModalities: readonly ModelModality[];
+
+    /** 解析附件的内容模态；用于 host__view_media 和 tool 媒体模态过滤 */
     resolveMediaModality: (contentHash: string) => Promise<ModelModality | undefined>;
 
     /** 请求人工输入；返回用户回答 */
@@ -593,13 +596,10 @@ export class RunEngine{
     ): AssistantMessage{
         if (refs.length === 0) return message;
 
-        const parts: ContentPart[] = typeof message.content === "string"
-            ? (message.content.length > 0 ? [{ type: "text", text: message.content }] : [])
-            : message.content.map((part) => ({ ...part }));
-
-        for (const ref of refs){
-            parts.push({ type: "attachment", attachment: { contentHash: ref.contentHash } });
-        }
+        const content = appendAttachmentRefs(message.content, refs);
+        const parts: ContentPart[] = typeof content === "string"
+            ? (content.length > 0 ? [{ type: "text", text: content }] : [])
+            : content.map((part) => ({ ...part }));
 
         return new AssistantMessage(
             parts,
@@ -711,8 +711,10 @@ export class RunEngine{
         definitions: readonly (ToolDefinition | null)[],
     ): Promise<void>{
         for (const [index, call] of calls.entries()){
-            const result = await this._invokeTool(ctx, toolkit, call, definitions[index] ?? null);
+            let result = await this._invokeTool(ctx, toolkit, call, definitions[index] ?? null);
             if (result === null) return;
+
+            result = await this._ingestToolAttachments(ctx, call, result);
 
             // 无论成功失败都物化成 ToolMessage，保证 call/result 成对
             ctx.run.appendMessage(tool(result, call.name, call.id));
@@ -759,11 +761,62 @@ export class RunEngine{
         if (failure !== undefined && failure.status === "rejected") throw failure.reason;
 
         for (const [index, call] of calls.entries()){
-            const result = results[index];
-            if (result === undefined) continue;
+            const rawResult = results[index];
+            if (rawResult === undefined) continue;
 
+            const result = await this._ingestToolAttachments(ctx, call, rawResult);
             ctx.run.appendMessage(tool(result, call.name, call.id));
             ctx.emit({ type: SessionEventType.TOOL_CALL_END, call, result });
+        }
+    }
+
+    /** 把工具产出的媒体落盘为 AttachmentRef，并追加到工具结果内容
+     * @note 落盘失败按“工具调用失败”处理，不终止整轮运行。
+     */
+    private async _ingestToolAttachments(
+        ctx: RunContext,
+        call: ToolCall,
+        result: ToolCallResult,
+    ): Promise<ToolCallResult>{
+        const pending = result.attachments;
+        if (pending === undefined || pending.length === 0) return result;
+        if (!result.status.isSuccess) return { ...result, attachments: undefined };
+
+        try{
+            const ingested = await ctx.ingestAttachments(pending, ctx.signal);
+            if (ingested.length === 0) return { ...result, attachments: undefined };
+
+            const content = appendAttachmentRefs(
+                result.content,
+                ingested.map((item) => item.ref),
+            );
+
+            for (const item of ingested){
+                ctx.emit({
+                    type: SessionEventType.TOOL_ATTACHMENT,
+                    call,
+                    attachment: item.ref,
+                    name: item.attachment.name,
+                    mimeType: item.attachment.mimeType,
+                });
+            }
+
+            return { ...result, content, attachments: undefined };
+        }catch(error){
+            if (ctx.signal.aborted) throw error;
+
+            const detail = error instanceof Error ? error.message : String(error);
+            const original = typeof result.content === "string" ? result.content : "";
+            const message = original.length > 0
+                ? `${original}\n\nTool media ingestion failed: ${detail}`
+                : `Tool media ingestion failed: ${detail}`;
+
+            return toolErrorResult(new ToolError(
+                ToolErrorType.ProviderError,
+                false,
+                message,
+                error,
+            ));
         }
     }
 
@@ -924,7 +977,7 @@ export class RunEngine{
                 `Media ${rawHash} is not a supported image, audio or video attachment`,
             ));
         }
-        if (!ctx.viewableModalities.includes(modality)){
+        if (!ctx.selfViewableModalities.includes(modality)){
             return toolErrorResult(new ToolError(
                 ToolErrorType.InvalidParams,
                 false,
@@ -1259,8 +1312,9 @@ export class Session{
         const history = this._currentSession;
         const provider = this._provider;
         await this._ensureRuntimeModel(provider);
+        await this._ensureModelCatalog(provider, this._runtimeOptions.model);
 
-        // 模型能力只读取已加载的模型列表，不主动发起网络请求；失败时退化为 Provider 级判断
+        // 模型能力只读取已加载的模型列表或宿主覆盖数据；失败时退化为 Provider 级判断
         let modelInfo: ModelInfo | undefined;
         try{
             modelInfo = await provider.resolveModelInfo(this._runtimeOptions.model);
@@ -1277,18 +1331,19 @@ export class Session{
             }
         }
 
-        // 工具回看条件：模型既能接收媒体，又能产出媒体，且 Provider 支持工具调用。
-        // 文本 -> 媒体或多媒体 -> 文本 都不会注入 view_media。
+        // viewableModalities 表示模型可接受的媒体输入；selfViewableModalities 表示
+        // 模型自己的产出可以回放（输入 ∩ 输出）。工具媒体只使用前者。
         const inputModalities = modelCapabilities?.chat?.input ?? [];
         const outputModalities = modelCapabilities?.chat?.output ?? [];
         const viewableModalities: ModelModality[] = inputModalities.filter(
-            (modality): modality is ModelModality => modality !== "text"
-                && modality !== "structured"
-                && outputModalities.includes(modality),
+            (modality): modality is ModelModality => modality !== "text" && modality !== "structured",
+        );
+        const selfViewableModalities = viewableModalities.filter(
+            (modality) => outputModalities.includes(modality),
         );
         const enableViewMedia = provider.supportsTools
             && modelCapabilities?.chat?.tools !== false
-            && viewableModalities.length > 0;
+            && selfViewableModalities.length > 0;
         const snapshot = history.snapshot();
 
         const inputMessage = user(input);
@@ -1318,11 +1373,17 @@ export class Session{
             enableUserInput,
             enableViewMedia,
             viewableModalities,
+            selfViewableModalities,
             resolveMediaModality: (contentHash) => this._resolveMediaModality(contentHash),
             requestUserInput: (request, call) => this._requestUserInput(request, call),
             requestApproval: (request) => this._requestApproval(request),
             prepareMessages: async (messages) =>
-                prepareProviderMessages(messages, snapshot.length, viewableModalities),
+                prepareProviderMessages(
+                    messages,
+                    snapshot.length,
+                    viewableModalities,
+                    (contentHash) => this._resolveMediaModality(contentHash),
+                ),
             resolveAttachments: (messages) => this._resolveAttachments(
                 messages,
                 provider,
@@ -1607,6 +1668,24 @@ export class Session{
         }
     }
 
+    /** 模型目录未加载时自动初始化；宿主覆盖过的模型以覆盖数据为准
+     * @note 初始化失败不抛出；后续按“模型能力未知”处理（不发送媒体输入）。
+     */
+    private async _ensureModelCatalog(
+        provider: ChatProvider,
+        model: string | undefined,
+    ): Promise<void>{
+        const modelProvider = provider.modelProvider;
+        if (modelProvider === null || modelProvider.isModelsInitialized) return;
+        if (model !== undefined && model.length > 0 && modelProvider.hasOverride(model)) return;
+
+        try{
+            await modelProvider.initModels();
+        }catch{
+            // 能力未知时退化为纯文本；不阻塞对话本身
+        }
+    }
+
     private _assertIdle(action: string): void{
         if (this._activeRun !== null){
             throw new SessionError(
@@ -1732,50 +1811,103 @@ function abortedResult(call: ToolCall): ToolCallResult{
  * - 当前轮的 tool 附件转成 synthetic user 消息（主流 chat 协议不接受 tool 媒体）；
  * - 历史 tool 附件剥离，避免每轮重复上传/发送。
  */
-function prepareProviderMessages(
+async function prepareProviderMessages(
     messages: readonly Message[],
     historyCount: number,
     viewableModalities: readonly ModelModality[],
-): Message[]{
+    resolveMediaModality: (contentHash: string) => Promise<ModelModality | undefined>,
+): Promise<Message[]>{
     const result: Message[] = [];
     let pendingMedia: string[] = [];
-    const canEgressToolMedia = viewableModalities.length > 0;
+    const supportedModalities = new Set(viewableModalities);
 
-    const flushToolMedia = (): void => {
+    const flushToolMedia = async (): Promise<void> => {
         if (pendingMedia.length === 0) return;
 
         const hashes = [...new Set(pendingMedia)];
         pendingMedia = [];
-        result.push(new UserMessage([
-            { type: "text", text: "Media returned by tool calls (attached below):" },
-            ...hashes.map((contentHash) => ({
-                type: "attachment" as const,
-                attachment: { contentHash },
-            })),
-        ]));
+
+        const parts: ContentPart[] = [];
+        const omitted: string[] = [];
+
+        for (const contentHash of hashes){
+            if (supportedModalities.size === 0){
+                omitted.push(`[tool media omitted: ${contentHash} (model does not accept media input)]`);
+                continue;
+            }
+
+            const modality = await resolveMediaModality(contentHash);
+            if (modality === undefined){
+                omitted.push(`[tool media omitted: ${contentHash} (media unavailable)]`);
+                continue;
+            }
+            if (!supportedModalities.has(modality)){
+                omitted.push(`[tool media omitted: ${contentHash} (${modality} input not supported)]`);
+                continue;
+            }
+
+            parts.push({ type: "attachment", attachment: { contentHash } });
+        }
+
+        const content: ContentPart[] = [];
+        if (parts.length > 0){
+            content.push({ type: "text", text: "Media returned by tool calls (attached below):" });
+            content.push(...parts);
+            content.push({
+                type: "text",
+                text: parts
+                    .filter((part) => part.type === "attachment")
+                    .map((part) => `[media:${part.attachment.contentHash}]`)
+                    .join("\n"),
+            });
+        }
+        if (omitted.length > 0){
+            content.push({ type: "text", text: omitted.join("\n") });
+        }
+        if (content.length > 0){
+            result.push(new UserMessage(content));
+        }
     };
 
     for (const [index, message] of messages.entries()){
         const isPending = index >= historyCount;
 
         if (message instanceof ToolMessage){
-            const prepared = prepareToolMessage(message, isPending && canEgressToolMedia);
+            const prepared = prepareToolMessage(message, isPending);
             result.push(prepared.message);
             pendingMedia.push(...prepared.media);
 
             const next = messages[index + 1];
-            if (!(next instanceof ToolMessage)) flushToolMedia();
+            if (!(next instanceof ToolMessage)) await flushToolMedia();
             continue;
         }
 
-        flushToolMedia();
+        await flushToolMedia();
         result.push(message instanceof AssistantMessage
             ? prepareAssistantMessage(message)
-            : message);
+            : message instanceof UserMessage
+                ? prepareUserMessage(message)
+                : message);
     }
 
-    flushToolMedia();
+    await flushToolMedia();
     return result;
+}
+
+/** 用户附件在发送给模型时保留图片内容，并附带 contentHash 供工具引用 */
+function prepareUserMessage(message: UserMessage): UserMessage{
+    if (typeof message.content === "string") return message;
+    if (!message.content.some((part) => part.type === "attachment")) return message;
+
+    const parts: ContentPart[] = [];
+    for (const part of message.content){
+        parts.push(part);
+        if (part.type === "attachment"){
+            parts.push({ type: "text", text: `[media:${part.attachment.contentHash}]` });
+        }
+    }
+
+    return new UserMessage(parts, message.isCompressed);
 }
 
 /** assistant 媒体在当前架构下只可能来自会话级媒体产出；统一写回 contentHash 标记 */
@@ -1801,7 +1933,7 @@ function prepareAssistantMessage(message: AssistantMessage): AssistantMessage{
 /** 当前轮的 tool 媒体交给 synthetic user 消息；历史 tool 媒体直接剥离 */
 function prepareToolMessage(
     message: ToolMessage,
-    allowEgress: boolean,
+    isPending: boolean,
 ): { message: ToolMessage; media: string[] }{
     if (typeof message.content === "string"){
         return { message, media: [] };
@@ -1818,10 +1950,13 @@ function prepareToolMessage(
             parts.push(part);
             continue;
         }
-        if (allowEgress){
+        if (isPending){
             media.push(part.attachment.contentHash);
         }else{
-            parts.push({ type: "text", text: "[tool media omitted]" });
+            parts.push({
+                type: "text",
+                text: `[tool media reference: ${part.attachment.contentHash}]`,
+            });
         }
     }
 
@@ -1835,6 +1970,23 @@ function prepareToolMessage(
         ),
         media,
     };
+}
+
+/** 在消息内容末尾追加附件引用 */
+function appendAttachmentRefs(
+    content: MessageContent,
+    refs: readonly AttachmentRef[],
+): MessageContent{
+    if (refs.length === 0) return content;
+
+    const parts: ContentPart[] = typeof content === "string"
+        ? (content.length > 0 ? [{ type: "text", text: content }] : [])
+        : content.map((part) => ({ ...part }));
+
+    for (const ref of refs){
+        parts.push({ type: "attachment", attachment: { contentHash: ref.contentHash } });
+    }
+    return parts;
 }
 
 /** 收集消息内容中的唯一附件内容指纹 */

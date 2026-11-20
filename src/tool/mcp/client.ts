@@ -594,6 +594,9 @@ function asMcpTool(value: unknown): McpTool | null {
             ? value.inputSchema
             : { type: "object", properties: {} },
         outputSchema: isRecord(value.outputSchema) ? value.outputSchema : undefined,
+        adviceTimeout: typeof value.adviceTimeout === "number" && Number.isFinite(value.adviceTimeout)
+            ? value.adviceTimeout
+            : undefined,
         annotations: asAnnotations(value.annotations),
     };
 }

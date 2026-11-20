@@ -134,7 +134,9 @@ export class MiniMaxH3VideoProvider extends AIProvider implements GenerationCapa
                 `MiniMax H3 Video only supports video generation, got "${request.modality}"`,
             );
         }
-        if (request.references !== undefined && request.references.length > 0) {
+        if ((request.references?.length ?? 0) > 0
+            || (request.referenceFiles?.length ?? 0) > 0
+            || (request.referenceUrls?.length ?? 0) > 0) {
             throw new InvalidParameterError(
                 "MiniMax H3 Video reference generation is not implemented yet",
             );
