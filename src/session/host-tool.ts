@@ -60,6 +60,7 @@ export const ASK_USER_TOOL_DEFINITION: ToolDefinition = {
     title: "Ask User",
     description: "向用户提出一个或多个选择题，并等待用户作答；适用于需要用户做决定、选择方案或补充关键信息的场景。",
     inputSchema: ASK_USER_INPUT_SCHEMA,
+    defaultTrust: "trusted",
     annotations: {
         readOnlyHint: true,
         requiresApproval: false,
@@ -96,6 +97,7 @@ export const VIEW_MEDIA_TOOL_DEFINITION: ToolDefinition = {
     description: "重新查看当前会话中 assistant 之前生成的媒体（图片/音频/视频）。"
         + "参数 contentHash 来自 assistant 消息中的 [media:<contentHash>] 标记。",
     inputSchema: VIEW_MEDIA_INPUT_SCHEMA,
+    defaultTrust: "trusted",
     annotations: {
         readOnlyHint: true,
         requiresApproval: false,
@@ -236,8 +238,15 @@ export function validateUserInputResult(
                 problems.push(`unknown option "${selectedId}" for "${question.id}"`);
             }
         }
-        if (answer.other !== undefined && question.allowOther !== true) {
-            problems.push(`"other" is not allowed for "${question.id}"`);
+        if (answer.other !== undefined) {
+            if (typeof answer.other !== "string") {
+                problems.push(`"other" for "${question.id}" must be a string`);
+            } else if (answer.other.trim().length === 0) {
+                problems.push(`"other" for "${question.id}" must be non-empty`);
+            }
+            if (question.allowOther !== true) {
+                problems.push(`"other" is not allowed for "${question.id}"`);
+            }
         }
     }
 
@@ -263,8 +272,9 @@ export function formatUserInputResult(
         const labels = answer.selected.map((id) => {
             return question.options.find((option) => option.id === id)?.label ?? id;
         });
-        if (answer.other !== undefined) {
-            labels.push(`其他: ${answer.other}`);
+        const other = typeof answer.other === "string" ? answer.other.trim() : undefined;
+        if (other !== undefined && other.length > 0) {
+            labels.push(`其他: ${other}`);
         }
 
         lines.push(`${title}: ${labels.length > 0 ? labels.join(", ") : "(empty)"}`);

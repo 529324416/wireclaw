@@ -189,56 +189,66 @@ export class QwenImageProvider extends AIProvider implements GenerationCapabilit
         };
 
         const requestSignal = createRequestSignal(options.signal, this._timeoutMs);
-        let response: Response;
         try{
-            response = await this._fetch(this._endpoint, {
-                method: "POST",
-                headers: this._headers,
-                body: JSON.stringify(requestBody),
-                signal: requestSignal.signal,
-            });
-        }catch(error){
-            if (options.signal?.aborted === true) throw error;
-            if (requestSignal.timedOut()){
+            let response: Response;
+            try{
+                response = await this._fetch(this._endpoint, {
+                    method: "POST",
+                    headers: this._headers,
+                    body: JSON.stringify(requestBody),
+                    signal: requestSignal.signal,
+                });
+            }catch(error){
+                if (options.signal?.aborted === true) throw error;
+                if (requestSignal.timedOut()){
+                    throw new SessionError(
+                        SessionErrorType.NetworkError,
+                        `Qwen image generation timed out after ${String(this._timeoutMs)}ms`,
+                        error,
+                    );
+                }
                 throw new SessionError(
                     SessionErrorType.NetworkError,
-                    `Qwen image generation timed out after ${String(this._timeoutMs)}ms`,
+                    "Qwen image generation request failed",
                     error,
                 );
             }
-            throw new SessionError(
-                SessionErrorType.NetworkError,
-                "Qwen image generation request failed",
-                error,
-            );
+
+            if (!response.ok){
+                throw await httpError("Qwen image generation", response);
+            }
+
+            let payload: unknown;
+            try{
+                payload = await response.json();
+            }catch(error){
+                if (options.signal?.aborted === true) throw error;
+                if (requestSignal.timedOut()){
+                    throw new SessionError(
+                        SessionErrorType.NetworkError,
+                        `Qwen image generation timed out after ${String(this._timeoutMs)}ms`,
+                        error,
+                    );
+                }
+                throw new SessionError(
+                    SessionErrorType.ProviderError,
+                    "Qwen image generation returned invalid JSON",
+                    error,
+                );
+            }
+
+            const parsed = parseImageResponse(payload);
+            options.onProgress?.({
+                progress: 1,
+                total: 1,
+                message: "image generated",
+                updatedAt: Date.now(),
+            });
+
+            return new QwenImageTask(parsed.requestId ?? uniqueId(), parsed.media);
         }finally{
             requestSignal.cleanup();
         }
-
-        if (!response.ok){
-            throw await httpError("Qwen image generation", response);
-        }
-
-        let payload: unknown;
-        try{
-            payload = await response.json();
-        }catch(error){
-            throw new SessionError(
-                SessionErrorType.ProviderError,
-                "Qwen image generation returned invalid JSON",
-                error,
-            );
-        }
-
-        const parsed = parseImageResponse(payload);
-        options.onProgress?.({
-            progress: 1,
-            total: 1,
-            message: "image generated",
-            updatedAt: Date.now(),
-        });
-
-        return new QwenImageTask(parsed.requestId ?? uniqueId(), parsed.media);
     }
 }
 

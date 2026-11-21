@@ -19,7 +19,7 @@ MCP 并不只是「跨进程提供工具」：
 - [x] JSON-RPC 2.0 请求 / 响应 / 通知
 - [x] `initialize` 握手、版本协商、`notifications/initialized`
 - [x] `tools/list`（分页、去重）、`tools/call`、`ping`
-- [x] stdio 传输（实现完成，待实机测试）
+- [x] stdio 传输
 - [x] Streamable HTTP（JSON / SSE 响应、session id、协议版本头）
 - [x] 工具名消毒 / 反向映射、注解与审批推导、结果与错误映射
 - [x] Registry 缓存失效、`closeAll`、Provider 错误隔离
@@ -39,13 +39,13 @@ MCP 并不只是「跨进程提供工具」：
 - [x] `adviceTimeout`（默认 30s，上限 3600s）
 - [x] 进度探针 API（按 `callId` 查询 + 延迟 5s 的 `TOOL_PROGRESS` 事件）
 - [x] `host__ask_user` 人工选择题（Session 自动注入，可用 `enableUserInput` 关闭）
-- [ ] 工具结果信任标记（不可信外部内容的提示/隔离）
+- [x] 工具结果信任标记（Tool/Provider 默认 + `trustHandle` 覆盖；提示/隔离由宿主消费）
 
 ### 协议广度
 
 - [ ] `resources`
 - [ ] `prompts`
-- [ ] `notifications/progress` 转发
+- [x] `notifications/progress` 转发
 - [ ] MCP `elicitation`（服务端发起的人工输入，复用 ask_user 表单机制）
 - [ ] 更完整的 JSON Schema 校验（`pattern` / `oneOf` / `$ref` 等）
 - [x] 用户图片附件（Ollama inline / DeepSeek Files API）
@@ -67,6 +67,9 @@ MCP 并不只是「跨进程提供工具」：
 - [x] DeepSeek、MiniMax Chat 迁移到共享基类；Ollama 复用共享流式聚合
 - [ ] Anthropic 协议基类（`src/platform/shared/anthropic` 已预留空目录，待实现 Messages API）
 - [x] 构建与分发：tsup 输出 browser/node bundle，tsc 输出声明，`exports` / `files` / `prepublishOnly`
+- [x] 模型级工具/思考门禁：Session 与 OpenAI 兼容 / DeepSeek / Ollama 双层校验
+- [x] 聚合测试入口 `tools/test-runner.mjs`、`typecheck:test`，并把 `tools/**` 纳入类型检查
+- [x] 测试脚本与夹具重新入库（`test/`）
 - [x] MiniMax H3-Image `GenerationCapability`（URL / b64_json + 模型级 capabilities）
 - [x] MiniMax H3-Image 实机测试（国内站 `https://api.minimax.cn`，1K PNG）
 - [x] MiniMax H3 视频异步任务 `GenerationTask`（创建 / 轮询 / 取消 / 恢复）
@@ -129,15 +132,18 @@ MCP 并不只是「跨进程提供工具」：
 - [x] 浏览器/Electron 版 `IFileHost`（OPFS / IndexedDB / 原生文件系统；Electron 主进程使用 `LocalFileHost`）
 - [ ] Electron 渲染进程的 IPC 桥接宿主（Session 不在主进程时）
 - [x] 包入口拆分：`wireclaw` / `wireclaw/browser` 浏览器安全，`wireclaw/node` 追加 `LocalFileHost`，`wireclaw/client` 提供 Node-only 参考实现
-- [ ] 统一 `AttachmentFileError` 错误类型（本地缺失、远端缺失、上传失败、网络、类型、超限）
-- [ ] 文件生命周期：引用计数、Pin、压缩/归档/删除、孤儿清理、存储配额
+- [x] `AttachmentFileError` 核心错误类型与错误码（Manager / Session 解析已接入）
+- [x] 文件生命周期基础：`delete` / `stats` / `gc`（默认 dry-run）/ 恢复元数据登记
+- [ ] Pin、压缩/归档、存储配额、引用计数持久化
 - [ ] 共享 Provider 下的上传取消语义与等待者隔离
 - [ ] 大文件流式读取/哈希/上传（当前主要在内存中处理）
 - [ ] 图片预处理：尺寸/EXIF/压缩、token 估算、单请求图片数量限制
 - [x] MCP `image` / `audio` / `resource` 接入 `IFileHost`，替换文本占位
 - [x] Chat 输出媒体落盘入口（`ChatResult.attachments` / `ChatOptions.onAttachment` / `ASSISTANT_ATTACHMENT`；具体 Provider 待接）
 - [ ] 远端文件清理/删除策略、缓存持久化与重启重建
-- [ ] 恢复会话时的附件存在性校验与缺失文件 UX
+- [x] 恢复会话时的附件存在性校验与缺失文件 UX（历史缺失降级、当前轮缺失失败）
+- [x] 会话 schema 版本与工具 `structuredContent` 持久化
+- [x] 会话附件元数据清单 sidecar（`<session>.attachments.json`）与 sourcePaths 恢复
 - [ ] URL 附件的长度限制、下载超时与 SSRF 防护
 - [ ] 安全：恶意文件、MIME 欺骗、多租户隔离、上传隐私/同意提示
 - [ ] UI 缩略图/大文件流式渲染

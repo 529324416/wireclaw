@@ -2,6 +2,7 @@ import {
     asBoolean,
     asEnum,
     asNonEmptyString,
+    asNonNegativeInteger,
     asNonNegativeNumber,
     asRecord,
     asString,
@@ -9,6 +10,8 @@ import {
     isJsonSafe,
     SerializationError,
 } from "../base";
+import { isContentHash } from "./attachment";
+import type { StoredAttachmentMeta } from "./attachment";
 import { ToolError, ToolErrorType } from "./error";
 import { AssistantMessage, SystemMessage, ToolMessage, UserMessage } from "./message";
 import type { Message } from "./message";
@@ -36,9 +39,12 @@ import type {
     ToolCall,
     ToolCallStatus,
     ToolCallStatusData,
+    ToolTrust,
 } from "./type";
 
 import { cloneMessageContent, cloneToolCalls } from "./utils";
+
+const TOOL_TRUST_VALUES: readonly ToolTrust[] = ["trusted", "unknown", "untrusted"];
 
 
 export class MessageSerializer{
@@ -104,7 +110,17 @@ export class MessageSerializer{
             toolName: message.toolName,
             callId: message.callId,
             details: MessageSerializer.serializeToolDetails(message.details),
+            ...(message.structuredContent === undefined
+                ? {}
+                : { structuredContent: MessageSerializer.serializeStructuredContent(message.structuredContent) }),
+            ...(message.trust === undefined ? {} : { trust: message.trust }),
+            ...(message.trustReason === undefined ? {} : { trustReason: message.trustReason }),
         }
+    }
+
+    /** 序列化工具结构化内容；必须可 JSON 安全往返 */
+    static serializeStructuredContent(value: object): object{
+        return MessageSerializer._cloneStructuredContent(value, "structuredContent");
     }
 
     /** 序列化工具调用详情
@@ -191,8 +207,27 @@ export class MessageSerializer{
                 const toolName = asString(record.toolName, "toolName");
                 const callId = asString(record.callId, "callId");
                 const details = MessageSerializer._deserializeToolDetails(record.details, "details");
+                const structuredContent = MessageSerializer._deserializeStructuredContent(
+                    record.structuredContent,
+                    "structuredContent",
+                );
+                const trust = record.trust === undefined
+                    ? undefined
+                    : asEnum(record.trust, TOOL_TRUST_VALUES, "trust");
+                const trustReason = record.trustReason === undefined
+                    ? undefined
+                    : asString(record.trustReason, "trustReason");
 
-                return new ToolMessage(content, toolName, callId, details, isCompressed);
+                return new ToolMessage(
+                    content,
+                    toolName,
+                    callId,
+                    details,
+                    isCompressed,
+                    structuredContent,
+                    trust,
+                    trustReason,
+                );
             }
 
             default:
@@ -288,6 +323,28 @@ export class MessageSerializer{
         return JSON.parse(serialized) as Record<string, unknown>;
     }
 
+    /** 反序列化工具结构化内容 */
+    private static _deserializeStructuredContent(
+        value: unknown,
+        field: string,
+    ): object | undefined{
+        if (value === undefined || value === null) return undefined;
+        return MessageSerializer._cloneStructuredContent(asRecord(value, field), field);
+    }
+
+    /** 校验并深拷贝 JSON 安全的工具结构化内容 */
+    private static _cloneStructuredContent(value: object, field: string): object{
+        if (!isJsonSafe(value)){
+            throw new SerializationError(`Tool ${field} should be JSON-serializable`);
+        }
+
+        const serialized = JSON.stringify(value);
+        if (serialized === undefined){
+            throw new SerializationError(`Tool ${field} should be JSON-serializable`);
+        }
+        return JSON.parse(serialized) as object;
+    }
+
     /** 反序列化助手消息用量 */
     private static _deserializeUsage(value: unknown, field: string): ChatUsage{
         const record = asRecord(value, field);
@@ -343,11 +400,97 @@ export class MessageSerializer{
     }
 }
 
+/** 当前会话 schema 版本；旧文件缺省按 1 处理 */
+export const SESSION_DATA_VERSION = 2;
+
+const SESSION_DATA_MIN_VERSION = 1;
+
+/** 附件元数据清单版本 */
+export const ATTACHMENT_MANIFEST_VERSION = 1;
+
+/** 与会话文件配套的附件元数据清单
+ * @note 单独保存，避免把原始路径写进会话 JSON；用于宿主元数据丢失后的恢复。
+ */
+export type SessionAttachmentManifest = {
+    version: number;
+    attachments: StoredAttachmentMeta[];
+};
+
+/** 附件元数据清单序列化器 */
+export class SessionAttachmentManifestSerializer{
+
+    /** 序列化附件元数据清单 */
+    static serialize(metas: readonly StoredAttachmentMeta[]): SessionAttachmentManifest{
+        return {
+            version: ATTACHMENT_MANIFEST_VERSION,
+            attachments: metas.map((meta) => ({
+                contentHash: meta.contentHash,
+                name: meta.name,
+                ...(meta.mimeType === undefined ? {} : { mimeType: meta.mimeType }),
+                size: meta.size,
+                sourcePaths: [...meta.sourcePaths],
+            })),
+        };
+    }
+
+    /** 反序列化附件元数据清单 */
+    static deserialize(data: unknown): StoredAttachmentMeta[]{
+        const record = asRecord(data, "attachmentManifest");
+        const version = asNonNegativeInteger(record.version, "attachmentManifest.version");
+        if (version !== ATTACHMENT_MANIFEST_VERSION){
+            throw new DeserializationError(
+                `Invalid attachment manifest: unsupported version ${version}`,
+            );
+        }
+
+        if (!Array.isArray(record.attachments)){
+            throw new DeserializationError(
+                "Invalid attachment manifest: attachments should be an array",
+            );
+        }
+
+        return record.attachments.map((item, index) => {
+            const field = `attachmentManifest.attachments[${index}]`;
+            const meta = asRecord(item, field);
+            const contentHash = asNonEmptyString(meta.contentHash, `${field}.contentHash`);
+            if (!isContentHash(contentHash)){
+                throw new DeserializationError(
+                    `Invalid attachment manifest: ${field}.contentHash must be a SHA-256 hex string`,
+                );
+            }
+
+            const sourcePaths = meta.sourcePaths === undefined
+                ? []
+                : (() => {
+                    if (!Array.isArray(meta.sourcePaths)){
+                        throw new DeserializationError(
+                            `Invalid attachment manifest: ${field}.sourcePaths should be an array`,
+                        );
+                    }
+                    return meta.sourcePaths.map((path, pathIndex) => {
+                        return asString(path, `${field}.sourcePaths[${pathIndex}]`);
+                    });
+                })();
+
+            return {
+                contentHash,
+                name: asString(meta.name, `${field}.name`),
+                ...(meta.mimeType === undefined
+                    ? {}
+                    : { mimeType: asString(meta.mimeType, `${field}.mimeType`) }),
+                size: asNonNegativeNumber(meta.size, `${field}.size`),
+                sourcePaths,
+            };
+        });
+    }
+}
+
 /** 会话数据序列化器 */
 export class SessionSerializer{
     /** 序列化会话数据 */
     static serialize(session: SessionHistory): SessionData{
         return {
+            version: SESSION_DATA_VERSION,
             id: session.id,
             messages: session.messages.map(msg => MessageSerializer.serialize(msg)),
             isArchived: session.isArchived,
@@ -357,6 +500,15 @@ export class SessionSerializer{
     /** 反序列化会话数据 */
     static deserialize(data: unknown): SessionHistory{
         const record = asRecord(data, "session");
+        const version = record.version === undefined
+            ? SESSION_DATA_MIN_VERSION
+            : asNonNegativeInteger(record.version, "version");
+        if (version < SESSION_DATA_MIN_VERSION || version > SESSION_DATA_VERSION){
+            throw new DeserializationError(
+                `Invalid session data: unsupported version ${version}`,
+            );
+        }
+
         const id = asString(record.id, "id");
         const isArchived = asBoolean(record.isArchived, "isArchived");
 

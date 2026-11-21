@@ -168,6 +168,12 @@ export type ToolCallResult = {
     /** 工具产出的待落盘媒体；由 Session 在工具执行后写入附件系统 */
     attachments?: readonly PendingAttachment[];
 
+    /** 最终信任级别；由 ToolRegistry 按 Tool/Provider 默认值与 trustHandle 写入 */
+    trust?: ToolTrust;
+
+    /** 信任判定原因 */
+    trustReason?: string;
+
     /** 原始数据 */
     raw?: unknown;
 }
@@ -233,7 +239,15 @@ export type MessageDataAssistant = MessageDataBase & {
     failureReason?: ChatFailureReason | undefined; 
     stopReason?: ChatStopReason | undefined; };
 export type MessageDataSystem = MessageDataBase & { role: typeof ChatRoleSystem };
-export type MessageDataTool = MessageDataBase & { role: typeof ChatRoleTool, toolName: string, callId: string, details: ToolCallStatusData };
+export type MessageDataTool = MessageDataBase & {
+    role: typeof ChatRoleTool,
+    toolName: string,
+    callId: string,
+    details: ToolCallStatusData,
+    structuredContent?: object,
+    trust?: ToolTrust,
+    trustReason?: string,
+};
 
 /** 消息数据 */
 export type MessageData = 
@@ -247,6 +261,9 @@ export type SessionData = {
     id: string;
     messages: MessageData[];
     isArchived: boolean;
+
+    /** 会话 schema 版本；旧文件缺省按 1 处理 */
+    version?: number;
 };
 
 export const SessionEventType = {
@@ -469,6 +486,19 @@ export type ToolDefinitionSource = {
     version?: string;
 };
 
+/** 工具结果的信任级别
+ * @note trusted 只表示来源可信，不保证内容正确；unknown 在提示/审计上按不可信处理。
+ */
+export type ToolTrust = "trusted" | "unknown" | "untrusted";
+
+/** 信任判定结果 */
+export type ToolTrustDecision = {
+    trust: ToolTrust;
+
+    /** 判定原因，用于 UI / 审计 / 调试 */
+    reason?: string;
+};
+
 /** 工具是什么（名称、描述、schema、权限注解）
  * @note name 是 Provider 提供的裸工具名（不含 Provider 前缀），
  *       ToolRegistry 会拼装为 `<providerId>__<name>` 后再暴露给模型。
@@ -479,6 +509,9 @@ export type ToolDefinition = {
     description: string;
     inputSchema: ToolParamSchema;      // 模型看到的参数 schema
     outputSchema?: ToolParamSchema;
+
+    /** Tool 作者声明的默认信任级别；未声明时回退到 Provider 默认值 */
+    defaultTrust?: ToolTrust;
 
     /** 建议的单次调用超时（毫秒）
      * @note 未设置时 Session 使用默认 30s；超过 1h 会被截断

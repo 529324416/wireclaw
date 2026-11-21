@@ -1,7 +1,11 @@
 import { SessionError, SessionErrorType } from "../../../session/error";
 import type { Message } from "../../../session/message";
 import { AIProvider } from "../../../session/protocol";
-import type { ChatCapability, ModelProvider } from "../../../session/protocol";
+import type {
+    ChatCapability,
+    ChatModelCapabilities,
+    ModelProvider,
+} from "../../../session/protocol";
 import type {
     ChatOptions,
     ChatResult,
@@ -57,6 +61,19 @@ export type OpenAICompatibleProviderOptions = {
 
     /** 流式工具调用缺少名称时的兜底；默认 tool_<index> */
     toolNameFallback?: (index: number) => string;
+};
+
+/** 已发出但尚未读完正文的 chat 响应
+ * @note 调用方必须在消费完正文（或失败）后调用 cleanup，否则超时定时器与外部取消监听会泄漏。
+ */
+export type ChatHttpResponse = {
+    response: Response;
+
+    /** 本次请求是否因 timeoutMs 超时 */
+    timedOut: () => boolean;
+
+    /** 释放超时定时器与外部取消监听 */
+    cleanup: () => void;
 };
 
 /**
@@ -121,22 +138,37 @@ export class OpenAICompatibleProvider extends AIProvider implements ChatCapabili
 
         this.checkChatOptions(messages, options, turn);
 
-        const payload = this.buildPayload(messages, options, turn);
-        const response = await this.postChat(payload, turn?.signal);
+        const chatCapabilities = (await this.resolveModelCapabilities(options.model))?.chat;
+        const payload = this.buildPayload(messages, options, turn, chatCapabilities);
+        const http = await this.postChat(payload, turn?.signal);
 
-        const { message, raw } = await consumeChatStream(response, {
-            format: "sse",
-            label: this._label,
-            adapter: this._protocolAdapter,
-            turn,
-            invalidJsonMessage: `${this._label} returned invalid SSE JSON`,
-            toolNameFallback: this._toolNameFallback,
-            invalidToolArgumentsMessage: (index) =>
-                `Invalid ${this._label} tool arguments at index ${index}`,
-            streamErrorMessage: (message) => message ?? `${this._label} stream error`,
-        });
+        try {
+            const { message, raw } = await consumeChatStream(http.response, {
+                format: "sse",
+                label: this._label,
+                adapter: this._protocolAdapter,
+                turn,
+                invalidJsonMessage: `${this._label} returned invalid SSE JSON`,
+                toolNameFallback: this._toolNameFallback,
+                invalidToolArgumentsMessage: (index) =>
+                    `Invalid ${this._label} tool arguments at index ${index}`,
+                streamErrorMessage: (message) => message ?? `${this._label} stream error`,
+            });
 
-        return { message, raw };
+            return { message, raw };
+        } catch (error) {
+            // 超时定时器现在覆盖正文读取；读取被超时中止时给出明确错误，而不是普通流错误。
+            if (http.timedOut() && turn?.signal?.aborted !== true) {
+                throw new SessionError(
+                    SessionErrorType.NetworkError,
+                    `${this._label} chat stream timed out after ${String(this._timeoutMs)}ms`,
+                    error,
+                );
+            }
+            throw error;
+        } finally {
+            http.cleanup();
+        }
     }
 
     /** 组装请求体；平台可以整体覆写 */
@@ -144,6 +176,7 @@ export class OpenAICompatibleProvider extends AIProvider implements ChatCapabili
         messages: readonly Message[],
         options: SessionRuntimeOptions,
         turn?: ChatOptions,
+        chatCapabilities?: ChatModelCapabilities,
     ): Record<string, unknown>{
         const payload: Record<string, unknown> = {
             model: options.model,
@@ -155,20 +188,28 @@ export class OpenAICompatibleProvider extends AIProvider implements ChatCapabili
             payload.stream_options = { include_usage: true };
         }
 
-        this.decoratePayload(payload, options, turn);
+        this.decoratePayload(payload, options, turn, chatCapabilities);
         return payload;
     }
 
-    /** 在基础请求体上补充通用可选项；平台特有字段通过覆写追加 */
+    /** 在基础请求体上补充通用可选项；平台特有字段通过覆写追加
+     * @param chatCapabilities 当前模型的 chat 能力；undefined 表示能力未知，保持旧行为
+     */
     protected decoratePayload(
         payload: Record<string, unknown>,
         options: SessionRuntimeOptions,
         turn?: ChatOptions,
+        chatCapabilities?: ChatModelCapabilities,
     ): void{
         if (options.temperature !== undefined){
             payload.temperature = options.temperature;
         }
-        if (turn?.tools !== undefined && turn.tools.length > 0){
+
+        // Provider 级与模型级双重门禁：模型明确声明 tools:false 时不下发工具定义。
+        if (this._supportsTools
+            && chatCapabilities?.tools !== false
+            && turn?.tools !== undefined
+            && turn.tools.length > 0){
             payload.tools = this._protocolAdapter.toolDefinitionsToPayload(turn.tools);
         }
     }
@@ -182,48 +223,52 @@ export class OpenAICompatibleProvider extends AIProvider implements ChatCapabili
         // 默认没有额外校验
     }
 
-    /** 发送请求并处理网络/HTTP 错误 */
+    /** 发送请求并处理网络/HTTP 错误
+     * @note 成功时返回的请求信号仍然有效，调用方必须消费完正文后执行 cleanup。
+     */
     protected async postChat(
         payload: Record<string, unknown>,
         signal: AbortSignal | undefined,
-    ): Promise<Response>{
+    ): Promise<ChatHttpResponse>{
         const requestSignal = createRequestSignal(signal, this._timeoutMs);
 
+        let response: Response;
         try{
-            let response: Response;
-            try{
-                response = await this._fetch(`${this._baseUrl}${this._chatPath}`, {
-                    method: "POST",
-                    headers: {
-                        ...this._headers,
-                        "Content-Type": "application/json",
-                    },
-                    body: JSON.stringify(payload),
-                    signal: requestSignal.signal,
-                });
-            }catch(error){
-                if (signal?.aborted === true) throw error;
-                if (requestSignal.timedOut()){
-                    throw new SessionError(
-                        SessionErrorType.NetworkError,
-                        `${this._label} chat request timed out after ${String(this._timeoutMs)}ms`,
-                        error,
-                    );
-                }
+            response = await this._fetch(`${this._baseUrl}${this._chatPath}`, {
+                method: "POST",
+                headers: {
+                    ...this._headers,
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify(payload),
+                signal: requestSignal.signal,
+            });
+        }catch(error){
+            requestSignal.cleanup();
+            if (signal?.aborted === true) throw error;
+            if (requestSignal.timedOut()){
                 throw new SessionError(
                     SessionErrorType.NetworkError,
-                    `${this._label} chat request failed`,
+                    `${this._label} chat request timed out after ${String(this._timeoutMs)}ms`,
                     error,
                 );
             }
-
-            if (!response.ok){
-                throw await httpError(`${this._label} chat`, response);
-            }
-
-            return response;
-        }finally{
-            requestSignal.cleanup();
+            throw new SessionError(
+                SessionErrorType.NetworkError,
+                `${this._label} chat request failed`,
+                error,
+            );
         }
+
+        if (!response.ok){
+            requestSignal.cleanup();
+            throw await httpError(`${this._label} chat`, response);
+        }
+
+        return {
+            response,
+            timedOut: requestSignal.timedOut,
+            cleanup: requestSignal.cleanup,
+        };
     }
 }

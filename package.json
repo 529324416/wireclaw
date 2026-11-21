@@ -51,9 +51,13 @@
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "npm run clean && tsup && node ./node_modules/typescript/bin/tsc -p tsconfig.build.json",
     "prepublishOnly": "npm run build",
-    "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/typescript/bin/tsc --noEmit -p tsconfig.browser.json",
+    "test": "node ./tools/test-runner.mjs",
+    "test:list": "node ./tools/test-runner.mjs --list",
+    "test:live": "node ./tools/test-runner.mjs --all",
+    "typecheck": "npm run typecheck:node && npm run typecheck:browser && npm run typecheck:test",
     "typecheck:node": "node ./node_modules/typescript/bin/tsc --noEmit",
-    "typecheck:browser": "node ./node_modules/typescript/bin/tsc --noEmit -p tsconfig.browser.json"
+    "typecheck:browser": "node ./node_modules/typescript/bin/tsc --noEmit -p tsconfig.browser.json",
+    "typecheck:test": "node ./node_modules/typescript/bin/tsc -p tsconfig.test.json --noEmit"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

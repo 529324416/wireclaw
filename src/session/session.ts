@@ -2,7 +2,12 @@ import { readMediaDuration, uniqueId } from "../base";
 import { SessionError, SessionErrorType, ToolError, ToolErrorType } from "./error";
 import type { AttachmentFileManager } from "./attachment-manager";
 import { AttachmentIngestor } from "./attachment-ingestor";
-import { isContentHash } from "./attachment";
+import {
+    AttachmentFileError,
+    AttachmentFileErrorCode,
+    collectAttachmentHashes,
+    isContentHash,
+} from "./attachment";
 import {
     detectMediaMimeType,
     mediaModalityFromMimeType,
@@ -47,6 +52,7 @@ import type {
 } from "./type";
 import type { ToolRegistry } from "./tool";
 import {
+    ASK_USER_TOOL_DEFINITION,
     ASK_USER_TOOL_NAME,
     HOST_TOOL_DEFINITIONS,
     VIEW_MEDIA_TOOL_DEFINITION,
@@ -408,6 +414,16 @@ export type IngestedAttachment = {
     ref: AttachmentRef;
 };
 
+/** 一次附件解析的结果 */
+export type AttachmentResolution = {
+
+    /** 当前 Provider 可用的附件表示；没有任何可用附件时省略 */
+    attachmentRefs?: AttachmentWireMap;
+
+    /** 历史消息中缺失、已被降级为文本占位符的 contentHash */
+    missing: ReadonlySet<string>;
+};
+
 export type RunContext = {
 
     /** 会话快照 */
@@ -440,6 +456,12 @@ export type RunContext = {
     /** 本次运行的权限等级 */
     permission: SessionPermission;
 
+    /** 当前模型是否允许工具调用（Provider 支持且模型未声明 tools:false） */
+    enableTools: boolean;
+
+    /** 当前模型是否允许思考参数（模型未声明 thinking:false） */
+    enableThinking: boolean;
+
     /** 工具进度事件延迟（毫秒） */
     toolProgressDelayMs: number;
 
@@ -469,10 +491,10 @@ export type RunContext = {
      */
     prepareMessages: (messages: readonly Message[]) => Promise<readonly Message[]>;
 
-    /** 解析本轮消息中的附件；无附件时返回 undefined
-     * @note 由 Session 通过 IFileHost 和 CloudFileManager 实现，RunEngine 不感知附件细节
+    /** 解析本轮消息中的附件
+     * @note 当前轮附件缺失视为失败；历史附件缺失会放入 missing，由 RunEngine 降级为文本占位符。
      */
-    resolveAttachments: (messages: readonly Message[]) => Promise<AttachmentWireMap | undefined>;
+    resolveAttachments: (messages: readonly Message[]) => Promise<AttachmentResolution>;
 
     /** 把 Provider 输出媒体落盘；无 AttachmentFileManager 时抛错 */
     ingestAttachments: (
@@ -524,17 +546,25 @@ export class RunEngine{
 
         // 附件解析必须发生在 Adapter 转换之前；Adapter 本身不访问 IFileHost。
         // prepareMessages 负责按回放策略裁剪历史媒体，再只解析真正会发送的附件。
-        const messages = await ctx.prepareMessages(this._messages(ctx));
-        const attachmentRefs = await ctx.resolveAttachments(messages);
+        const preparedMessages = await ctx.prepareMessages(this._messages(ctx));
+        const resolution = await ctx.resolveAttachments(preparedMessages);
+        const messages = resolution.missing.size === 0
+            ? preparedMessages
+            : degradeMissingAttachments(preparedMessages, resolution.missing);
 
         emit({ type: SessionEventType.ASSISTANT_START });
 
-        const chatResult = await ctx.provider.chat(messages, ctx.runtimeOptions, {
+        const runtimeOptions = ctx.enableThinking
+            ? ctx.runtimeOptions
+            : withoutThinkingOptions(ctx.runtimeOptions);
+        const chatResult = await ctx.provider.chat(messages, runtimeOptions, {
             onToken: _onToken,
             onAttachment: _onAttachment,
             signal: ctx.signal,
             tools: tools.length > 0 ? [...tools] : undefined,
-            ...(attachmentRefs === undefined ? {} : { attachmentRefs }),
+            ...(resolution.attachmentRefs === undefined
+                ? {}
+                : { attachmentRefs: resolution.attachmentRefs }),
         });
 
         // 兜底：如果模型全程思考没有输出，手动触发思考结束事件
@@ -648,17 +678,26 @@ export class RunEngine{
             ? []
             : await ctx.tools.listTools(ctx.signal);
 
-        // host 工具本身依赖工具调用能力；不支持工具的 Provider 保持纯对话
-        if (ctx.provider.supportsTools){
-            if (ctx.enableUserInput) tools.push(...HOST_TOOL_DEFINITIONS);
-            if (ctx.enableViewMedia) tools.push(VIEW_MEDIA_TOOL_DEFINITION);
-        }
-
         if (tools.length > 0 && !ctx.provider.supportsTools){
             throw new SessionError(
                 SessionErrorType.MissingTools,
                 "The current LLM provider does not support tool calls",
             );
+        }
+
+        // 模型明确声明 tools:false 时保持纯对话，也不注入 host 工具。
+        if (!ctx.enableTools) return [];
+
+        // host 工具本身依赖工具调用能力；不支持工具的 Provider 保持纯对话
+        const names = new Set(tools.map((tool) => tool.name));
+        const hostTools: readonly ToolDefinition[] = [
+            ...(ctx.enableUserInput ? HOST_TOOL_DEFINITIONS : []),
+            ...(ctx.enableViewMedia ? [VIEW_MEDIA_TOOL_DEFINITION] : []),
+        ];
+        for (const hostTool of hostTools){
+            if (names.has(hostTool.name)) continue;
+            names.add(hostTool.name);
+            tools.push(hostTool);
         }
 
         return tools;
@@ -835,12 +874,18 @@ export class RunEngine{
 
         // host 内置工具：人工输入（不经过 ToolRegistry）
         if (ctx.enableUserInput && ctx.provider.supportsTools && call.name === ASK_USER_TOOL_NAME){
-            return await this._askUser(ctx, call);
+            return applyHostTrust(
+                await this._askUser(ctx, call),
+                ASK_USER_TOOL_DEFINITION.defaultTrust,
+            );
         }
 
         // host 内置工具：回看当前会话中 assistant 生成过的媒体
         if (ctx.enableViewMedia && call.name === VIEW_MEDIA_TOOL_NAME){
-            return await this._viewMedia(ctx, call);
+            return applyHostTrust(
+                await this._viewMedia(ctx, call),
+                VIEW_MEDIA_TOOL_DEFINITION.defaultTrust,
+            );
         }
 
         if (toolkit === undefined){
@@ -1341,9 +1386,13 @@ export class Session{
         const selfViewableModalities = viewableModalities.filter(
             (modality) => outputModalities.includes(modality),
         );
-        const enableViewMedia = provider.supportsTools
-            && modelCapabilities?.chat?.tools !== false
-            && selfViewableModalities.length > 0;
+        // 模型级门禁：模型明确声明 tools:false / thinking:false 时不再下发对应能力。
+        // 模型能力未知（undefined）时保持 Provider 级旧行为。
+        const modelChatCapabilities = modelCapabilities?.chat;
+        const enableTools = provider.supportsTools
+            && modelChatCapabilities?.tools !== false;
+        const enableThinking = modelChatCapabilities?.thinking !== false;
+        const enableViewMedia = enableTools && selfViewableModalities.length > 0;
         const snapshot = history.snapshot();
 
         const inputMessage = user(input);
@@ -1369,6 +1418,8 @@ export class Session{
             maxSteps,
             toolConcurrency,
             permission,
+            enableTools,
+            enableThinking,
             toolProgressDelayMs,
             enableUserInput,
             enableViewMedia,
@@ -1386,6 +1437,7 @@ export class Session{
                 ),
             resolveAttachments: (messages) => this._resolveAttachments(
                 messages,
+                new Set(collectAttachmentHashes(run.pendingMessages)),
                 provider,
                 abortController.signal,
                 modelCapabilities,
@@ -1473,22 +1525,25 @@ export class Session{
 
     /** 解析本轮消息中的附件
      * @param messages 本轮发送给模型的消息（快照 + 待提交消息）
+     * @param requiredHashes 当前轮必须可用的附件；缺失时直接失败
      * @param provider 当前对话 Provider
      * @param signal 取消信号
      * @param capabilities 当前模型的模型级能力；undefined 表示模型能力未知
-     * @returns 内容指纹到 Provider 附件表示的映射；无附件时返回 undefined
+     * @param modelInfo 当前模型的完整信息
+     * @returns 可用附件映射与已降级的历史缺失附件
      */
     private async _resolveAttachments(
         messages: readonly Message[],
+        requiredHashes: ReadonlySet<string>,
         provider: ChatProvider,
         signal: AbortSignal,
         capabilities: ModelCapabilities | undefined,
         modelInfo: ModelInfo | undefined,
-    ): Promise<AttachmentWireMap | undefined>{
-        const contentHashes = collectAttachmentHashes(messages);
+    ): Promise<AttachmentResolution>{
+        const contentHashes = new Set(collectAttachmentHashes(messages));
         if (contentHashes.size === 0){
             this._attachmentRefs = new Map();
-            return undefined;
+            return { missing: new Set() };
         }
 
         const attachmentManager = this._attachmentManager;
@@ -1510,6 +1565,7 @@ export class Session{
         const model = this._runtimeOptions.model;
         const inputModalities = capabilities?.chat?.input;
         const modalityCounts = new Map<ModelModality, number>();
+        const missing = new Set<string>();
 
         // 先构建新映射，成功后再替换；解析失败时不破坏上一轮的有效状态
         const attachmentRefs = new Map<string, RemoteFileRef>();
@@ -1524,11 +1580,21 @@ export class Session{
 
             const file = await attachmentManager.get(contentHash);
             if (file === undefined){
-                throw new SessionError(
-                    SessionErrorType.InvalidData,
-                    `Attachment file is missing or corrupted: ${contentHash}; `
-                        + "the session data cannot be fully restored",
-                );
+                // 当前轮附件缺失必须失败；历史附件缺失只降级，不阻塞会话继续。
+                if (requiredHashes.has(contentHash)){
+                    const meta = await attachmentManager.getMeta(contentHash).catch(() => undefined);
+                    throw new AttachmentFileError(
+                        AttachmentFileErrorCode.Missing,
+                        `Attachment file is missing or corrupted: ${contentHash}`,
+                        {
+                            contentHash,
+                            sourcePaths: meta?.sourcePaths,
+                        },
+                    );
+                }
+
+                missing.add(contentHash);
+                continue;
             }
 
             const mimeType = file.mimeType ?? detectMediaMimeType(file.content);
@@ -1585,7 +1651,10 @@ export class Session{
         }
 
         this._attachmentRefs = attachmentRefs;
-        return attachmentRefs;
+        return {
+            ...(attachmentRefs.size === 0 ? {} : { attachmentRefs }),
+            missing,
+        };
     }
 
     /** 解析附件的内容模态；附件缺失或不是媒体时返回 undefined */
@@ -1749,6 +1818,14 @@ function resolveMediaInputLimit(
     return { ...base, ...specific };
 }
 
+/** 模型不支持思考时，不把 think / thinkingLv 传给 Provider */
+function withoutThinkingOptions(options: SessionRuntimeOptions): SessionRuntimeOptions{
+    const next = { ...options };
+    delete next.think;
+    delete next.thinkingLv;
+    return next;
+}
+
 /** 计算工具调用超时：工具建议值优先，默认 30s，上限 1h */
 function resolveToolTimeout(definition: ToolDefinition | null): number{
     const configured = definition?.adviceTimeout;
@@ -1803,6 +1880,77 @@ function abortedResult(call: ToolCall): ToolCallResult{
             `Tool call "${call.name}" was aborted`,
         ),
     );
+}
+
+/** 把历史消息中已缺失的附件降级为文本占位符
+ * @note 当前轮附件缺失会在 resolveAttachments 阶段直接失败；这里只处理历史附件。
+ *       同时移除紧随其后的 `[media:<hash>]` 标记，避免模型继续引用不存在的媒体。
+ */
+function degradeMissingAttachments(
+    messages: readonly Message[],
+    missing: ReadonlySet<string>,
+): Message[]{
+    return messages.map((message) => {
+        if (typeof message.content === "string") return message;
+
+        let changed = false;
+        const parts: ContentPart[] = [];
+
+        for (const part of message.content){
+            if (part.type === "attachment" && missing.has(part.attachment.contentHash)){
+                changed = true;
+                parts.push({
+                    type: "text",
+                    text: `[attachment unavailable: ${part.attachment.contentHash}]`,
+                });
+                continue;
+            }
+
+            if (part.type === "text"){
+                const markerHash = mediaMarkerHash(part.text);
+                if (markerHash !== undefined && missing.has(markerHash)){
+                    changed = true;
+                    continue;
+                }
+            }
+
+            parts.push(part);
+        }
+
+        if (!changed) return message;
+
+        if (message instanceof AssistantMessage){
+            return new AssistantMessage(
+                parts,
+                message.isCompressed,
+                message.thinking,
+                message.usage,
+                [...message.toolCalls],
+                message.stopReason,
+                message.failureReason,
+            );
+        }
+        if (message instanceof ToolMessage){
+            return new ToolMessage(
+                parts,
+                message.toolName,
+                message.callId,
+                message.details,
+                message.isCompressed,
+            );
+        }
+        if (message instanceof UserMessage){
+            return new UserMessage(parts, message.isCompressed);
+        }
+
+        return message;
+    });
+}
+
+/** 从 `[media:<hash>]` 标记中取出 contentHash */
+function mediaMarkerHash(text: string): string | undefined{
+    const match = /^\[media:([a-f0-9]{64})\]$/.exec(text.trim());
+    return match?.[1];
 }
 
 /** 构造本轮发送给 Provider 的消息副本
@@ -1989,21 +2137,12 @@ function appendAttachmentRefs(
     return parts;
 }
 
-/** 收集消息内容中的唯一附件内容指纹 */
-function collectAttachmentHashes(messages: readonly Message[]): Set<string>{
-    const contentHashes = new Set<string>();
-
-    for (const message of messages){
-        if (typeof message.content === "string") continue;
-
-        for (const part of message.content){
-            if (part.type === "attachment"){
-                contentHashes.add(part.attachment.contentHash);
-            }
-        }
-    }
-
-    return contentHashes;
+/** 为不经过 ToolRegistry 的 host 工具补充默认信任级别 */
+function applyHostTrust(
+    result: ToolCallResult,
+    trust: ToolDefinition["defaultTrust"],
+): ToolCallResult{
+    return trust === undefined ? result : { ...result, trust };
 }
 
 function errorMessage(error: unknown): string{

@@ -5,7 +5,7 @@ import { SessionError, SessionErrorType } from "../../session/error";
 import { detectMediaMimeType, mediaModalityFromMimeType } from "../../session/media";
 import type { Message } from "../../session/message";
 import { CloudFileManager, ModelProvider } from "../../session/protocol";
-import type { ModelInfo, ModelLimits } from "../../session/protocol";
+import type { ChatModelCapabilities, ModelInfo, ModelLimits } from "../../session/protocol";
 import type {
     ChatOptions,
     ChatResult,
@@ -299,8 +299,9 @@ export class QwenChatProvider extends OpenAICompatibleProvider {
         payload: Record<string, unknown>,
         options: SessionRuntimeOptions,
         turn?: ChatOptions,
+        chatCapabilities?: ChatModelCapabilities,
     ): void{
-        super.decoratePayload(payload, options, turn);
+        super.decoratePayload(payload, options, turn, chatCapabilities);
         // Omni 默认可能输出音频；本轮只消费文本
         if (options.model?.toLowerCase().includes("omni")){
             payload.modalities = ["text"];

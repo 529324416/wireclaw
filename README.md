@@ -115,7 +115,7 @@ await session.run([
 ]);
 ```
 
-`sourcePaths` are stored with the attachment metadata. If the host loses the bytes, the manager tries to recover them from the original paths.
+`sourcePaths` are stored with the attachment metadata. If the host loses the bytes, the manager tries to recover them from the original paths. A missing **historical** attachment is sent to the model as `[attachment unavailable: <contentHash>]` instead of blocking the session; a missing attachment in the current turn still fails the run.
 
 ## Browser / Electron renderer
 
@@ -168,6 +168,8 @@ registry.registerProvider(createMcpProvider({
 }));
 ```
 
+Tool results carry a trust marker (`ToolCallResult.trust` / `ToolMessage.trust`): tools and providers declare defaults, and a host can pass `new ToolRegistry({ trustHandle })` to override them per call. Trust never changes permissions, so `full` still means full; hosts can use the marker for prompt framing, UI badges, or audit.
+
 Tool results can carry media through `ToolCallResult.attachments`. `Session` stores them in the attachment manager and, when the active model accepts that media input, forwards them as a synthetic user message for the next turn. MCP `image` / `audio` / `resource` results use the same pipeline. The reference MiniMax H3-Image and ComfyUI Qwen-Image tools also accept optional `references` (session `contentHash` or image URL), `seed`, and `negative_prompt`.
 
 The reference Node client registers two local ComfyUI Qwen-Image tools when their workflows exist: `comfyui-image__generateImage` and `comfyui-edit__editImage` (requires at least one reference image). Set `COMFYUI_BASE_URL`, `WIRECLAW_COMFYUI_WORKFLOW`, and `WIRECLAW_COMFYUI_EDIT_WORKFLOW` to point at another ComfyUI instance/workflow. These test tools live in `tools/` and are not part of the published `wireclaw/client` entry.
@@ -189,7 +191,9 @@ See [architecture.md](./architecture.md) for the full semantics of `readonly` / 
 
 ```bash
 npm install
-npm run typecheck
+npm run typecheck   # source, browser-safe surface, tools and tests
+npm test            # offline suite; excludes live/local-service scripts
+npm run test:live   # live scripts; needs local services or API keys
 npm run build
 ```
 

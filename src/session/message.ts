@@ -14,6 +14,7 @@ import type {
     ToolCallStatus,
     ToolCallResult,
     MessageContent,
+    ToolTrust,
 } from "./type";
 
 import { cloneMessageContent } from "./utils";
@@ -175,6 +176,9 @@ export class ToolMessage extends Message{
     private _toolName: string;
     private _callId: string;
     private _details: ToolCallStatus;
+    private _structuredContent: object | undefined;
+    private _trust: ToolTrust | undefined;
+    private _trustReason: string | undefined;
 
     /** 工具名称 */
     get toolName(): string{
@@ -187,6 +191,18 @@ export class ToolMessage extends Message{
     /** 工具调用详情 */
     get details(): ToolCallStatus{
         return {...this._details};
+    }
+    /** 工具结构化内容；用于 UI / Harness 展示 */
+    get structuredContent(): object | undefined{
+        return this._structuredContent;
+    }
+    /** 最终信任级别；由 ToolRegistry 判定 */
+    get trust(): ToolTrust | undefined{
+        return this._trust;
+    }
+    /** 信任判定原因 */
+    get trustReason(): string | undefined{
+        return this._trustReason;
     }
     /** 本次工具调用是否成功 */
     get isSuccess(): boolean{
@@ -206,12 +222,18 @@ export class ToolMessage extends Message{
         toolName: string,
         callId: string, 
         details: ToolCallStatus,
-        isCompressed?: boolean
+        isCompressed?: boolean,
+        structuredContent?: object,
+        trust?: ToolTrust,
+        trustReason?: string,
     ){
         super(ChatRoleTool, content, isCompressed);
         this._toolName = toolName;
         this._callId = callId;
         this._details = {...details};
+        this._structuredContent = structuredContent;
+        this._trust = trust;
+        this._trustReason = trustReason;
     }
 
     override clone(): ToolMessage{
@@ -222,6 +244,9 @@ export class ToolMessage extends Message{
             this._callId,
             this._details,
             c.isCompressed,
+            this._structuredContent,
+            this._trust,
+            this._trustReason,
         );
     }
 }
@@ -282,6 +307,9 @@ export function tool(result: ToolCallResult, toolName: string, callId: string): 
         toolName, 
         callId, 
         result.status,
-        false
+        false,
+        result.structuredContent,
+        result.trust,
+        result.trustReason,
     );
 }

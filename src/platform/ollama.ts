@@ -566,10 +566,12 @@ export class OllamaProvider extends AIProvider implements ChatCapability{
             );
         }
 
+        const model = this._modelProvider.availableModels?.find(
+            (item) => item.id === options.model || item.name === options.model,
+        );
+        const chatCapabilities = model?.capabilities?.chat;
+
         if (turn?.attachmentRefs !== undefined && turn.attachmentRefs.size > 0){
-            const model = this._modelProvider.availableModels?.find(
-                (item) => item.id === options.model || item.name === options.model,
-            );
             if (model !== undefined && !model.isVisionModel){
                 throw new SessionError(
                     SessionErrorType.InvalidRequest,
@@ -591,10 +593,13 @@ export class OllamaProvider extends AIProvider implements ChatCapability{
         if (Object.keys(requestOptions).length > 0){
             payload.options = requestOptions;
         }
-        if (turn?.tools !== undefined && turn.tools.length > 0){
+        // 模型明确声明不支持时不下发对应参数；能力未知时保持旧行为。
+        if (turn?.tools !== undefined
+            && turn.tools.length > 0
+            && chatCapabilities?.tools !== false){
             payload.tools = this._protocolAdapter.toolDefinitionsToPayload(turn.tools);
         }
-        if (options.think !== undefined){
+        if (options.think !== undefined && chatCapabilities?.thinking !== false){
             payload.think = options.think;
         }
 

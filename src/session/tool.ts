@@ -9,6 +9,8 @@ import type {
     ToolDefinitionSource,
     ToolParamSchema,
     ToolProgress,
+    ToolTrust,
+    ToolTrustDecision,
 } from "./type";
 
 /* ---------------------------------------------------------------------------
@@ -54,6 +56,20 @@ export type ToolInvokeOptions = {
     onProgress?: (progress: ToolProgress) => void;
 };
 
+/** 宿主提供的信任判定钩子
+ * @param call 模型侧工具调用（name 带 Provider 前缀）
+ * @param result 已 finalize 的工具结果
+ * @param definition 完整工具定义；未命中时为 null
+ * @returns 信任决策；返回 undefined 表示保留 Tool/Provider 默认值
+ * @note 外部程序通过闭包携带 workspace / 白名单 / 文档库等上下文；
+ *       Wireclaw 不定义 TrustContext，也不把外部状态传入核心。
+ */
+export type ToolTrustHandle = (
+    call: ToolCall,
+    result: ToolCallResult,
+    definition: ToolDefinition | null,
+) => ToolTrustDecision | undefined | Promise<ToolTrustDecision | undefined>;
+
 /** 已由 ToolRegistry 拼装完成的工具定义（名称带前缀，source 必有值） */
 export type RegisteredTool = ToolDefinition & {
     source: ToolDefinitionSource;
@@ -72,6 +88,9 @@ export type ToolRegistryOptions = {
 
     /** 工具列表缓存 TTL（毫秒）；<= 0 表示不自动过期。默认 0 */
     toolCacheTtlMs?: number;
+
+    /** 宿主信任判定钩子；在工具结果 finalize 后调用 */
+    trustHandle?: ToolTrustHandle;
 };
 
 
@@ -85,6 +104,9 @@ export interface ToolProvider {
 
     /** 工具提供者描述 */
     description: string;
+
+    /** Provider 级默认信任级别；ToolDefinition.defaultTrust 优先 */
+    defaultTrust?: ToolTrust;
 
     /** 列出所有工具
      * @note 返回的 name 必须是裸工具名（不含 Provider 前缀，也不含 "__"）；
@@ -146,6 +168,9 @@ export class ToolRegistry {
     /** 工具列表缓存 TTL */
     private readonly _toolCacheTtlMs: number;
 
+    /** 宿主信任判定钩子 */
+    private readonly _trustHandle?: ToolTrustHandle;
+
     /** 工具列表缓存时间 */
     private _toolsCachedAt: number | null = null;
 
@@ -165,6 +190,7 @@ export class ToolRegistry {
         this._onProviderError = options.onProviderError;
         this._maxResultChars = options.maxResultChars ?? DEFAULT_MAX_TOOL_RESULT_CHARS;
         this._toolCacheTtlMs = options.toolCacheTtlMs ?? 0;
+        this._trustHandle = options.trustHandle;
     }
 
     /** 注册工具提供者
@@ -282,6 +308,12 @@ export class ToolRegistry {
      * @throws unknown 当 Provider 抛出非 ToolError 异常时（程序缺陷，不作为工具结果）
      */
     async invoke(call: ToolCall, options: ToolInvokeOptions = {}): Promise<ToolCallResult> {
+        const result = await this._invoke(call, options);
+        return await this._applyTrust(call, result);
+    }
+
+    /** 执行工具调用并完成结果归一化；信任判定在 invoke 外层完成 */
+    private async _invoke(call: ToolCall, options: ToolInvokeOptions = {}): Promise<ToolCallResult> {
         const startedAt = performance.now();
         const elapsed = (): number => Math.max(0, Math.round(performance.now() - startedAt));
 
@@ -409,6 +441,56 @@ export class ToolRegistry {
             },
             structuredContent: undefined,
             raw: normalized.raw,
+        };
+    }
+
+    /** 应用 Tool/Provider 默认信任与宿主 trustHandle
+     * @note trust 只写入结果元数据，不参与权限判断；handler 失败时 fail-closed 为 untrusted。
+     */
+    private async _applyTrust(
+        call: ToolCall,
+        result: ToolCallResult,
+    ): Promise<ToolCallResult> {
+        const parsed = parseToolName(call.name);
+        const provider = parsed === null ? undefined : this._providers.get(parsed.providerId);
+        const definition = this._tools?.find((tool) => tool.name === call.name) ?? null;
+
+        const defaultTrust: ToolTrust = definition?.defaultTrust
+            ?? provider?.defaultTrust
+            ?? "unknown";
+
+        if (this._trustHandle === undefined) {
+            return { ...result, trust: defaultTrust };
+        }
+
+        let decision: ToolTrustDecision | undefined;
+        try {
+            decision = await this._trustHandle(call, result, definition);
+        } catch (error) {
+            this._onProviderError?.(provider?.id ?? "trust", error);
+            return {
+                ...result,
+                trust: "untrusted",
+                trustReason: `trust handle failed: ${errorMessage(error)}`,
+            };
+        }
+
+        if (decision === undefined) {
+            return { ...result, trust: defaultTrust };
+        }
+
+        if (typeof decision !== "object" || decision === null || !isToolTrust(decision.trust)) {
+            return {
+                ...result,
+                trust: "untrusted",
+                trustReason: "trust handle returned an invalid decision",
+            };
+        }
+
+        return {
+            ...result,
+            trust: decision.trust,
+            ...(typeof decision.reason === "string" ? { trustReason: decision.reason } : {}),
         };
     }
 
@@ -779,6 +861,15 @@ function formatParamProblems(toolName: string, problems: readonly string[]): str
 function truncateText(text: string, limit: number): string {
     if (text.length <= limit) return text;
     return `${text.slice(0, limit)}\n\n[... truncated: ${text.length - limit} chars omitted ...]`;
+}
+
+/** 校验外部 trustHandle 返回的信任级别 */
+function isToolTrust(value: unknown): value is ToolTrust {
+    return value === "trusted" || value === "unknown" || value === "untrusted";
+}
+
+function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
 }
 
 

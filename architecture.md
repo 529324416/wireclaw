@@ -131,10 +131,17 @@ limits?: {
 - 参考 harness 的 `client.ts` 还支持本地 `modelOverwrite.json`（`WIRECLAW_MODEL_OVERWRITE_FILE`）：文件条目按 `Partial<ModelInfo>` 书写，在 Provider 模型目录初始化后与默认 `ModelInfo` 深度合并；文件未出现的字段保留初始化默认值。支持数组和 `{ modelId: info }` 两种格式，也兼容 `isVisionModel` 等派生 bool 字段。
 - `modelOverwrite.json` 只覆盖当前 Provider 目录中已存在的模型；它是宿主侧静态配置，不进入核心包。请把 `modelOverwrite.example.json` 复制为 `modelOverwrite.json` 后使用；默认文件已被 git 忽略。
 
+**模型级工具与思考门禁**：
+
+- Session 在运行前读取当前模型的 `chat.tools` / `chat.thinking`；模型明确声明 `tools:false` 时不向 Provider 下发任何工具（包括 `host__ask_user` / `host__view_media`），声明 `thinking:false` 时不传递 `think` / `thinkingLv`。模型能力未知时保持 Provider 级旧行为。
+- OpenAI 兼容 Provider 在组装请求体时再按模型 `chat.tools` 做一次门禁；DeepSeek / Ollama 在模型明确声明 `thinking:false` 时不发送思考参数。
+- 当前请求侧的思考参数映射仍由各 Provider 自行实现（DeepSeek 的 `thinking` / `reasoning_effort`、Ollama 的 `think`）；MiniMax / Qwen 的请求参数映射属于后续能力扩展，不影响门禁本身。
+
 ### 平台共享层（platform/shared）
 
 - `shared/http.ts`：base URL 归一化、Bearer 鉴权头、fetch 解析、超时/取消信号与 HTTP 错误映射。
-- `shared/stream.ts`：SSE / NDJSON 逐行读取与流式聚合（文本、思考、工具调用、usage、结束原因、附件回调）。
+- `shared/stream.ts`：SSE / NDJSON 逐行读取与流式聚合（文本、思考、工具调用、usage、结束原因、附件回调）；Provider 的请求信号会贯穿正文读取，因此外部取消与超时在流式阶段仍然生效。
+- OpenAI 兼容 Provider 的请求信号覆盖到完整响应正文：`postChat` 返回响应后由消费方在流读取结束时释放超时定时器与取消监听，避免“只保护响应头”。
 - `shared/openai/`：`OpenAIProtocolAdapter` 与 `OpenAICompatibleProvider` 基类，负责 OpenAI 兼容的消息/工具/流式转换与请求骨架；平台通过覆写 `attachmentPart`、`parseUsage`、`parseStopReason`、`parseToolCalls`、`decoratePayload`、`checkChatOptions` 表达差异。
 - 当前复用者：DeepSeek（Files API 附件）、MiniMax Chat、Qwen Chat；Ollama 仅复用 NDJSON 聚合。
 - `shared/anthropic/` 为占位目录；Anthropic Messages API 的 adapter/provider 尚未实现，详见 `todo.md`。
@@ -262,6 +269,7 @@ CLI 命令：
 | `/list_models` | 列出当前 Provider 的模型及能力 |
 | `/tools` | 列出当前可用工具（含 MCP） |
 | `/permission [readonly\|approval\|full]` | 查看/切换权限 |
+| `/system <text>` | 在会话还没有任何 user/assistant/tool 消息时追加 system 消息；已有对话时拒绝 |
 | `/upload <media-path>` | 追加图片/音频/视频附件；按当前模型的 `chat.input` 与 `limits` 做外部校验，随下一条消息发送 |
 | `/attachments` | 列出会话附件，导出到 `<WIRECLAW_FILES_DIR>/exports` 并打印 `file://` 链接，可用本地默认软件打开 |
 | `/save_session [path]` | 保存会话（默认 `./wireclaw-session.json`） |
@@ -332,16 +340,30 @@ close?(): Promise<void>
 ```ts
 put(name, content, mimeType?, sourcePaths?): Promise<AttachmentFile>
 get(contentHash): Promise<AttachmentFile | undefined>
+require(contentHash): Promise<AttachmentFile>
+getMeta(contentHash): Promise<StoredAttachmentMeta | undefined>
 has(contentHash): Promise<boolean>
+inspect(contentHashes): Promise<AttachmentAvailability[]>
+list(): Promise<readonly StoredAttachmentMeta[]>
+stats(): Promise<{ count; totalBytes }>
+delete(contentHash): Promise<boolean>
+gc(referencedHashes, { dryRun? }): Promise<{ dryRun; deleted; kept }>
+registerRecoveryMeta(meta): void
 rebuild(): Promise<void>
 close(): Promise<void>
 ```
 
 - `put`：计算指纹后立即调用 `host.write`，更新索引与有界 LRU 缓存；
 - `get`：缓存 → `host.read` → 校验指纹；字节缺失时用 `host.readMeta` 的 `sourcePaths` 尝试读取原始路径，成功后写回宿主；
+- `require`：明确要求附件可用；缺失时抛 `AttachmentFileError(Missing)`，错误里携带 `contentHash` / `sourcePaths`；
+- `inspect`：批量返回 `present` / `metadata-only` / `missing`，不因单个附件失败而中断；用于恢复会话前检查；
 - `readSourcePath` 由应用注入；Node / Electron 主进程通常使用 `readLocalSourcePath`，浏览器通常不提供；
+- `registerRecoveryMeta`：登记会话附件清单中的元数据；宿主元数据或字节丢失时，用清单里的 `sourcePaths` 尝试恢复；
+- `delete` / `gc`：显式生命周期接口；`gc` 默认 `dryRun: true`，只报告将删除的条目。调用方必须把**消息附件与 toolCall 参数中的 contentHash** 都放进 `referencedHashes`，否则参考图可能被误删；
+- `collectAttachmentHashes(messages, { includeToolParams })` 是统一的引用收集入口；默认只收集消息附件，清单/清理场景开启 toolCall 参数扫描；
 - 索引可随时通过 `host.list()` 重建；manager 自身不持久化整个附件库；
-- 缓存只保存少量 `AttachmentFile`，不会常驻所有字节。
+- 缓存只保存少量 `AttachmentFile`，不会常驻所有字节；
+- 附件系统统一使用 `AttachmentFileError`（`Missing` / `Corrupted` / `RecoveryFailed` / `Storage` / `UnsupportedType` / `LimitExceeded` / `Network`），`origin` 保留底层错误。
 
 ### Session 解析流程
 
@@ -360,7 +382,9 @@ close(): Promise<void>
 - `Session` 只在运行期持有 `AttachmentWireMap`，不持久化；
 - 切换 Provider、切换附件管理器或切换会话时清空；
 - 同一 `contentHash` 只解析一次；
-- 附件缺失或恢复失败时视为数据损坏，在调用模型前失败；
+- **当前轮附件缺失**（用户刚上传 / 工具刚产出）视为失败，抛出 `AttachmentFileError(Missing)`；
+- **历史附件缺失**不会阻塞会话：被替换为 `[attachment unavailable: <contentHash>]` 文本，并移除相邻的 `[media:<contentHash>]` 标记；
+- 恢复会话时先用 `AttachmentFileManager.inspect` 统计 present / metadata-only / missing，并打印缺失清单；恢复本身不失败；
 - 失败运行不会污染历史。
 
 ### 模型能力与附件路由
@@ -520,9 +544,12 @@ PendingAttachment (bytes / url / remote-id)
 - 严格 schema：附件只接受 `{ contentHash: string }`；
 - 空指纹、缺失字段、类型错误全部拒绝；
 - 不再兼容早期 `{ id }` 草稿；
+- `SessionData.version` 当前为 2；旧文件缺少 `version` 时按 1 接受，未来版本会被拒绝；
+- 工具消息的 `structuredContent` 会持久化并 round-trip；旧文件没有该字段时按 `undefined` 处理；
 - 会话 JSON 不包含远端 fileId、URL、字节或 Provider 信息；
 - `sourcePaths` 保存在宿主元数据中，不进入会话 JSON；
-- 会话 JSON 不是自包含的：恢复时必须由同一个宿主提供对应文件与元数据。
+- 参考 CLI 在保存会话时额外写 `<session>.attachments.json` 元数据清单（`SessionAttachmentManifestSerializer`），恢复时用 `registerRecoveryMeta` 补充宿主元数据/`sourcePaths`；清单是旁路文件，不改变会话 JSON 的隐私边界；
+- 会话 JSON 不是自包含的：恢复时必须由同一个宿主提供对应文件与元数据；缺少元数据时可以由附件清单补足恢复线索。
 
 ### 限制
 
@@ -532,7 +559,9 @@ PendingAttachment (bytes / url / remote-id)
 - Session 只读取已加载的模型目录；显式指定模型但宿主未调用 `initModels()` 时，模型能力校验会跳过，但 `defaultModelLimits` 中的媒体限制仍会执行（Provider 仍会拒绝不支持的请求）；宿主应先初始化模型目录或注入覆盖；
 - DeepSeek 单文件上限 64 MiB；
 - 上传/校验失败视为发送失败；
-- 路径恢复只在宿主元数据仍存在、且至少一个原始路径可读时有效；
+- 路径恢复只在宿主元数据仍存在（或恢复了附件清单）、且至少一个原始路径可读时有效；
+- 历史附件缺失会降级为 `[attachment unavailable: <hash>]`；当前轮附件缺失仍会导致运行失败；
+- `delete` / `gc` 已提供；Pin、压缩/归档、存储配额、跨 Provider 的远端文件清理尚未实现；
 - 浏览器存储（OPFS）可能被静默清理；Electron 主进程建议使用 `LocalFileHost`；
 - assistant 媒体默认不回放，只保留在历史/UI；
 - MiniMax Chat 暂不支持输入附件；
@@ -622,15 +651,53 @@ new DeepSeekProvider({
   - 模型调用后 run 进入暂停，发出 `TOOL_INPUT_REQUIRED` 事件；
   - 前端通过 `session.respondUserInput(...)` 提交答案，答案以 ToolMessage 返回模型；
   - 默认开启，可用 `run(..., { enableUserInput: false })` 关闭；不支持工具调用的 Provider 不会被注入。
+  - `allowOther: true` 时，`UserInputAnswer.other` 是唯一的自由输入出口；`other` 必须是非空字符串（`validateUserInputResult` 会拒绝空字符串、纯空白和非字符串）。
+  - 参考 CLI 在 `allowOther: true` 时追加“其他（自由输入）”槽位，支持 `4, 内容`（中英文逗号均可）与直接输入文字；选项标签含“其他/备注/说明”或选中该槽位时，会强制要求补充非空文字，避免把空备注提交给模型。
 - host 内置工具 `host__view_media`（assistant 历史媒体回看）：
   - 只在“模型可接收媒体 + 可产出同一媒体模态 + 支持工具调用”时注入，覆盖 image / audio / video；
   - 参数 `contentHash` 来自 assistant 消息中的 `[media:<contentHash>]` 标记；
   - 工具结果携带 attachment，由 Session 重新 `ensureFile` 后发送给模型；
   - 只允许当前会话 assistant 消息中出现过的媒体，不读取任意附件。
+- host 工具按完整工具名去重：Provider 已经提供同名工具时不会重复广告。
 - 三档权限：
   - `readonly`：只允许 `readOnlyHint === true` 的工具，其余直接拒绝
   - `approval`：`requiresApproval` 的工具暂停等待人工审批
   - `full`：全部放行，破坏性工具会发出 `TOOL_PERMISSION_WARNING`
+
+### 工具结果信任标记
+
+- **两个维度正交**：`permission` 决定“是否允许执行 / 是否需要审批”；`trust` 决定“内容如何提示、展示与审计”。`trust` 不改变 `permission` 的语义。
+- **信任来源只有两个**：
+  1. Tool 自身的默认声明（例如 `searchWeb` 默认 `untrusted`）；
+  2. 宿主程序的判定（按路径、域名、MCP Server、文件来源、是否由当前会话创建等覆盖）。
+  模型只接收最终结果，不参与、也不能提升自己的信任级别。
+- **信任级别**：`trusted` / `unknown` / `untrusted`。`unknown` 在提示与审计上按不可信处理（fail-closed），但它同样不触发审批。
+- **`full` 不降级**：`full` 下即使结果是 `unknown` / `untrusted`，也不得追加审批、不得自动降为 `readonly`；仍按 `full` 执行，只允许：
+  - 在模型上下文中加不可信边界/提示；
+  - 在 UI/事件中标记 `[untrusted]`；
+  - 发出警告或审计事件。
+- **第三方声明不是授权**：MCP Server 或远端工具自称 `trusted` 只能作为线索；最终信任级别由宿主按 Server 身份与策略决定。
+- **隔离与审批分开**：提示边界、上下文摘要、路径/域名白名单、沙箱属于隔离或能力边界；其中只有显式配置的审批才属于 `permission`，不能由 `trust` 隐式触发。
+- **可配置的严格模式**：如果宿主需要额外防护，必须显式配置（例如 `trustEnforcement: "strict"`）；默认行为仍是“标记 + 提示 + 审计，不改变 full”。
+
+实现结构：
+
+- `ToolDefinition.defaultTrust?: ToolTrust`：Tool 作者默认值；
+- `ToolProvider.defaultTrust?: ToolTrust`：Provider 级默认值，Tool 级优先；
+- `ToolRegistryOptions.trustHandle?: ToolTrustHandle`：宿主判定钩子，在工具结果 finalize 后调用；
+- `ToolTrustHandle(call, result, definition)`：只接收 Wireclaw 已持有的三个参数，不定义 `TrustContext`；外部程序用闭包携带 workspace / 白名单 / 文档库等状态；
+- `ToolCallResult.trust` / `trustReason`：Registry 写入的最终判定；
+- `ToolMessage.trust` / `trustReason`：随会话历史持久化，UI / 回放 / 审计可读；
+- `TOOL_CALL_END` 事件携带的 `result` 直接包含 trust。
+
+默认值与策略：
+
+- MCP 外部 Provider 默认 `untrusted`；host 可通过 `trustHandle` 对特定 Server/工具提升；
+- host 内置工具默认 `trusted`；
+- 参考本地工具：`readFile` 默认 `unknown`（宿主可按工作区/文档库白名单提升），`writeFile` 默认 `trusted`（结果是 host 生成的写入状态）；
+- `trustHandle` 返回 `undefined` 时保留 Tool/Provider 默认值；抛异常或返回非法值时按 `untrusted` fail-closed，并记录 `trustReason`；
+- trust 标记本身不自动改写模型上下文、不触发审批；宿主可读取 `ToolMessage.trust` 后自行把不可信内容包装成提示边界或隔离区；
+- 参考 CLI 在 `[tool] ... -> ok` 后显示 `[trusted]` / `[unknown]` / `[untrusted]` 徽章。
 
 ## MCP 实现（tool/mcp 核心 + src/client 传输）
 
@@ -844,7 +911,21 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:5000/mcp `
 
 ## 测试
 
-当前机械测试脚本放在 `test/`（暂未入库）：
+测试脚本与夹具位于 `test/`（已纳入版本库），推荐使用聚合入口：
+
+```bash
+npm test                 # 离线套件，默认跳过实机/本地服务脚本
+npm run test:list        # 列出默认会运行的脚本
+npm test -- model-gating # 按文件名过滤
+npm run test:live        # --all，包含实机脚本
+npm run typecheck:test   # 测试脚本类型检查
+```
+
+- `tools/test-runner.mjs` 用 esbuild 原生二进制把每个脚本打包成 ESM，再交给当前 Node 运行；不通过管道捕获子进程输出，因此兼容受限沙箱。
+- 默认跳过依赖 Ollama / ComfyUI / Flask / Python 子进程或真实 API key 的脚本；`entry-smoke` / `package-types` 需要先构建 `dist`，缺失时会跳过并提示，也不进入 `typecheck:test`。
+- `npm run typecheck` 现在包含 `typecheck:node`、`typecheck:browser`、`typecheck:test`；`tools/**` 也进入 Node 类型检查。
+
+以下为逐脚本调试示例（非完整清单）：
 
 ```bash
 npx tsx test/tool-registry.ts
@@ -885,6 +966,10 @@ npx tsx test/minimax-image-tool.ts
 npx tsx test/comfyui-image-tool.ts
 npx tsx test/comfyui-image-edit-tool.ts
 npx tsx test/model-overwrite.ts
+npx tsx test/model-gating.ts
+npx tsx test/attachment-lifecycle.ts
+npx tsx test/tool-trust.ts
+npx tsx test/ask-user-choice.ts
 ```
 
 实机用例：

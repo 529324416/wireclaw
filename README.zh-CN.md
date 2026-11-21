@@ -115,7 +115,7 @@ await session.run([
 ]);
 ```
 
-`sourcePaths` 会随附件元数据保存；宿主字节被删除时，管理器会尝试从原始路径恢复。
+`sourcePaths` 会随附件元数据保存；宿主字节被删除时，管理器会尝试从原始路径恢复。历史消息中的附件缺失会以 `[attachment unavailable: <contentHash>]` 文本降级，不再阻塞会话；当前轮新附件缺失仍会使运行失败。
 
 ## 浏览器 / Electron 渲染进程
 
@@ -168,6 +168,8 @@ registry.registerProvider(createMcpProvider({
 }));
 ```
 
+工具结果带有信任标记（`ToolCallResult.trust` / `ToolMessage.trust`）：Tool / Provider 声明默认值，宿主可以通过 `new ToolRegistry({ trustHandle })` 按次覆盖。信任标记不改变权限，`full` 仍然是 `full`；宿主可以用它做提示边界、UI 徽章或审计。
+
 工具结果可以通过 `ToolCallResult.attachments` 携带媒体。`Session` 会把它们写入附件管理器，并在当前模型接受该媒体输入时，转换成下一轮的 synthetic user 消息。MCP 的 `image` / `audio` / `resource` 结果复用同一条链路。参考 MiniMax H3-Image 与 ComfyUI Qwen-Image 工具还支持可选的 `references`（会话 contentHash 或图片 URL）、`seed` 与 `negative_prompt`。
 
 参考 Node 客户端会注册两个本地 ComfyUI Qwen-Image 工具：`comfyui-image__generateImage` 与 `comfyui-edit__editImage`（后者必须提供至少 1 张参考图）。可通过 `COMFYUI_BASE_URL`、`WIRECLAW_COMFYUI_WORKFLOW` 与 `WIRECLAW_COMFYUI_EDIT_WORKFLOW` 指向其他实例/工作流。这些测试工具位于 `tools/`，不属于发布的 `wireclaw/client` 入口。
@@ -189,7 +191,9 @@ await session.run("只读查询", {
 
 ```bash
 npm install
-npm run typecheck
+npm run typecheck   # 源码、浏览器安全面、tools 与测试脚本
+npm test            # 离线套件；默认跳过实机/本地服务脚本
+npm run test:live   # 实机脚本；需要本地服务或 API key
 npm run build
 ```
 

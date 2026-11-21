@@ -2,7 +2,7 @@ import { fromBase64 } from "../../base";
 import { DEFAULT_ATTACHMENT_MAX_BYTES } from "../../session/attachment-ingestor";
 import { isToolError, ToolError, ToolErrorType } from "../../session/error";
 import type { PendingAttachment } from "../../session/media";
-import type { ToolCall, ToolCallResult, ToolDefinition, ToolParamSchema } from "../../session/type";
+import type { ToolCall, ToolCallResult, ToolDefinition, ToolParamSchema, ToolTrust } from "../../session/type";
 import type { ToolCallOptions, ToolProvider } from "../../session/tool";
 import { McpClient } from "./client";
 import {
@@ -37,6 +37,9 @@ export class McpToolProvider implements ToolProvider {
     readonly id: string;
     readonly name: string;
     readonly description: string;
+
+    /** 外部 MCP 工具默认按不可信处理；宿主可通过 trustHandle 覆盖 */
+    readonly defaultTrust: ToolTrust = "untrusted";
 
     private readonly _config: McpServerConfig;
     private readonly _client: McpClient;

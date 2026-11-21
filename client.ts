@@ -24,6 +24,8 @@ import {
 import { ComfyUIImageToolProvider } from "./tools/comfyui-image-tool";
 import type { ComfyUIWorkflow } from "./tools/comfyui-image-tool";
 import { ComfyUIImageEditToolProvider } from "./tools/comfyui-image-edit-tool";
+import { isOtherLikeOption, parseQuestionChoice } from "./tools/ask-user-choice";
+import type { ParsedQuestionChoice } from "./tools/ask-user-choice";
 import {
     applyModelOverwrites,
     loadModelOverwriteFile,
@@ -31,6 +33,7 @@ import {
 import type { ModelOverwriteEntry } from "./tools/model-overwrite";
 import {
     AttachmentFileManager,
+    collectAttachmentHashes,
     DEFAULT_SESSION_PERMISSION,
     detectMediaMimeType,
     extensionForMediaMimeType,
@@ -38,6 +41,7 @@ import {
     mediaModalityFromMimeType,
     RunStatus,
     Session,
+    SessionAttachmentManifestSerializer,
     SessionHistory,
     SessionPermission,
     SessionSerializer,
@@ -45,14 +49,67 @@ import {
     validateMediaInputLimit,
 } from "./src/session/index";
 import type { ChatProvider, ModelInfo } from "./src/session/protocol";
+import type { StoredAttachmentMeta } from "./src/session/attachment";
+import { system } from "./src/session/message";
 import { SessionEventType } from "./src/session/type";
-import type { Message } from "./src/session/message";
 import type {
     SessionEvent,
     SessionRuntimeOptions,
     UserInputAnswer,
     UserInputResult,
 } from "./src/session/type";
+
+/* ---------------------------------------------------------------------------
+ * TUI 颜色：只影响参考 CLI 的终端展示，不进入 wireclaw 核心。
+ * 遵循 NO_COLOR / FORCE_COLOR / TERM=dumb，非 TTY 输出保持纯文本。
+ * ------------------------------------------------------------------------- */
+const ANSI = {
+    reset: "\u001B[0m",
+    bold: "\u001B[1m",
+    dim: "\u001B[2m",
+    underline: "\u001B[4m",
+    red: "\u001B[31m",
+    green: "\u001B[32m",
+    yellow: "\u001B[33m",
+    blue: "\u001B[34m",
+    magenta: "\u001B[35m",
+    cyan: "\u001B[36m",
+    gray: "\u001B[90m",
+} as const;
+
+type AnsiStyle = keyof typeof ANSI;
+
+function colorsEnabled(stream: NodeJS.WriteStream): boolean {
+    // FORCE_COLOR 优先，方便在 NO_COLOR / 重定向场景下显式预览颜色。
+    const force = process.env.FORCE_COLOR;
+    if (force !== undefined && force.length > 0) {
+        if (force === "0" || force.toLowerCase() === "false") return false;
+        return true;
+    }
+
+    if (process.env.NO_COLOR !== undefined) return false;
+    if (process.env.TERM === "dumb") return false;
+    if (stream.isTTY !== true) return false;
+    if (typeof stream.hasColors === "function") {
+        try {
+            return stream.hasColors();
+        } catch {
+            return true;
+        }
+    }
+    return true;
+}
+
+function paint(
+    text: string,
+    styles: AnsiStyle | readonly AnsiStyle[],
+    stream: NodeJS.WriteStream = process.stdout,
+): string {
+    if (!colorsEnabled(stream)) return text;
+
+    const list: readonly AnsiStyle[] = Array.isArray(styles) ? styles : [styles];
+    return `${list.map((style) => ANSI[style]).join("")}${text}${ANSI.reset}`;
+}
 
 /**
  * Wireclaw 控制台客户端。
@@ -79,6 +136,8 @@ import type {
  *   WIRECLAW_COMFYUI_IMAGE_TOOL 设为 0 时不注册 ComfyUI 生图工具
  *   WIRECLAW_COMFYUI_EDIT_TOOL 设为 0 时不注册 ComfyUI 修图工具
  *   WIRECLAW_MODEL_OVERWRITE_FILE 默认 ./modelOverwrite.json
+ *   NO_COLOR           设置后关闭 TUI 颜色
+ *   FORCE_COLOR=1      强制开启 TUI 颜色（优先级高于 NO_COLOR）
  *   DASHSCOPE_API_KEY  直接指定 Qwen API key（优先于文件）
  *   QWEN_API_KEY_FILE  默认 ./apikey-qwen.txt
  *   QWEN_BASE_URL      默认 https://dashscope.aliyuncs.com/compatible-mode/v1
@@ -102,6 +161,7 @@ import type {
 
 const BASE_URL = process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434";
 const DEFAULT_SESSION_PATH = "./wireclaw-session.json";
+const ATTACHMENT_MANIFEST_SUFFIX = ".attachments.json";
 const MCP_URL = process.env.WIRECLAW_MCP_URL ?? "http://127.0.0.1:5000/mcp";
 const MCP_ID = process.env.WIRECLAW_MCP_ID ?? "mcp";
 const MCP_DISABLED = process.env.WIRECLAW_MCP_DISABLE === "1";
@@ -208,6 +268,16 @@ function errorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
 }
 
+function errorLine(message: string): void {
+    console.error(paint(message, "red", process.stderr));
+}
+
+function isMissingFileError(error: unknown): boolean {
+    return typeof error === "object"
+        && error !== null
+        && (error as NodeJS.ErrnoException).code === "ENOENT";
+}
+
 type ExportedMedia = {
     path: string;
     url: string;
@@ -216,17 +286,7 @@ type ExportedMedia = {
     size: number;
 };
 
-/** 收集会话历史中的唯一附件指纹 */
-function collectAttachmentHashes(messages: readonly Message[]): string[] {
-    const hashes = new Set<string>();
-    for (const message of messages) {
-        if (typeof message.content === "string") continue;
-        for (const part of message.content) {
-            if (part.type === "attachment") hashes.add(part.attachment.contentHash);
-        }
-    }
-    return [...hashes];
-}
+
 
 /** 把附件从 IFileHost 导出为带扩展名的本地文件，供控制台点击打开 */
 async function exportAttachmentFile(
@@ -512,7 +572,7 @@ async function resolveStartupProvider(): Promise<ProviderRuntime> {
             return runtime;
         } catch (error) {
             lastError = error;
-            console.error(`[provider:${id}] ${errorMessage(error)}`);
+            errorLine(`[provider:${id}] ${errorMessage(error)}`);
         }
     }
 
@@ -613,17 +673,19 @@ async function main(): Promise<void> {
     const askApproval = async (event: ApprovalEvent): Promise<void> => {
         const { call, tool } = event;
 
-        process.stdout.write(`\n[approval] ${call.name}\n`);
-        process.stdout.write(`  params: ${shortJson(call.params, 400)}\n`);
+        process.stdout.write(`\n${paint("[approval]", ["bold", "yellow"])} ${paint(call.name, "bold")}\n`);
+        process.stdout.write(`  ${paint("params:", "dim")} ${paint(shortJson(call.params, 400), "dim")}\n`);
 
         const risks: string[] = [];
         if (tool?.annotations?.destructiveHint === true) risks.push("destructive");
         if (tool?.annotations?.requiresApproval === true) risks.push("requires approval");
-        if (risks.length > 0) process.stdout.write(`  risk: ${risks.join(", ")}\n`);
+        if (risks.length > 0) {
+            process.stdout.write(`  ${paint("risk:", ["bold", "red"])} ${paint(risks.join(", "), "red")}\n`);
+        }
 
         let answer = "";
         try {
-            answer = await rl.question("  approve? [y/N] ");
+            answer = await rl.question(`  ${paint("approve? [y/N] ", "yellow")}`);
         } catch {
             answer = "";
         }
@@ -631,68 +693,133 @@ async function main(): Promise<void> {
         const decision = /^y(es)?$/i.test(answer.trim()) ? "approve" : "deny";
         const resumed = session.resume(decision);
         process.stdout.write(
-            resumed ? `  ${decision}\n` : "  (run is no longer waiting for approval)\n",
+            resumed
+                ? `  ${paint(decision, decision === "approve" ? "green" : "red")}\n`
+                : "  (run is no longer waiting for approval)\n",
         );
     };
 
     const askUserInput = async (event: InputEvent): Promise<void> => {
         const { request } = event;
-        process.stdout.write(`\n[input] ${request.title ?? "需要你的选择"}\n`);
+        process.stdout.write(`\n${paint("[input]", ["bold", "yellow"])} ${request.title ?? "需要你的选择"}\n`);
 
         const answers: UserInputAnswer[] = [];
 
+        const cancelRequest = (): void => {
+            const cancelled = session.respondUserInput({
+                requestId: request.id,
+                answers: [],
+                cancelled: true,
+            });
+            process.stdout.write(
+                cancelled
+                    ? `  ${paint("cancelled", "yellow")}\n`
+                    : "  (run is no longer waiting for input)\n",
+            );
+        };
+
         for (const question of request.questions) {
-            process.stdout.write(`\n  ${question.header ? `[${question.header}] ` : ""}${question.question}\n`);
+            const allowOther = question.allowOther === true;
+            const hasOtherLikeOption = question.options.some(isOtherLikeOption);
+            const showPseudoOther = allowOther && !hasOtherLikeOption;
+            const pseudoOtherIndex = showPseudoOther ? question.options.length + 1 : undefined;
+
+            process.stdout.write(`\n  ${question.header ? `${paint(`[${question.header}]`, "dim")} ` : ""}${paint(question.question, "bold")}\n`);
             question.options.forEach((option, index) => {
                 process.stdout.write(
-                    `    ${index + 1}) ${option.label}${option.description ? ` - ${option.description}` : ""}\n`,
+                    `    ${paint(`${index + 1})`, "dim")} ${option.label}${option.description ? ` - ${paint(option.description, "dim")}` : ""}\n`,
                 );
             });
+            if (showPseudoOther) {
+                process.stdout.write(`    ${paint(`${question.options.length + 1})`, "dim")} ${paint("其他（自由输入）", "dim")}\n`);
+            }
+            if (allowOther) {
+                process.stdout.write(paint(
+                    "    可直接输入文字作为自由输入；选择“其他/备注”项后会要求补充说明，也可输入“序号, 内容”\n",
+                    "dim",
+                ));
+            }
 
-            let selected: string[] = [];
-            while (true) {
+            let choice: ParsedQuestionChoice | undefined;
+            while (choice === undefined) {
                 let line = "";
+                let readFailed = false;
                 try {
-                    line = await rl.question(
-                        question.multiSelect === true ? "  选择（逗号分隔）: " : "  选择: ",
-                    );
+                    line = await rl.question(paint(
+                        question.multiSelect === true
+                            ? "  选择（逗号分隔，可附文字）: "
+                            : "  选择: ",
+                        "yellow",
+                    ));
                 } catch {
-                    line = "";
+                    readFailed = true;
+                }
+
+                if (readFailed) {
+                    cancelRequest();
+                    return;
                 }
 
                 const trimmed = line.trim();
                 if (trimmed.length === 0) {
-                    const cancelled = session.respondUserInput({
-                        requestId: request.id,
-                        answers: [],
-                        cancelled: true,
-                    });
-                    process.stdout.write(
-                        cancelled ? "  cancelled\n" : "  (run is no longer waiting for input)\n",
-                    );
+                    cancelRequest();
                     return;
                 }
 
-                const indexes = trimmed.split(",").map((part) => Number.parseInt(part.trim(), 10));
-                const valid = indexes.length > 0
-                    && indexes.every((index) => Number.isInteger(index) && index >= 1 && index <= question.options.length)
-                    && (question.multiSelect === true || indexes.length === 1);
-
-                if (!valid) {
-                    process.stdout.write("  无效选择\n");
+                const parsed = parseQuestionChoice(
+                    trimmed,
+                    question.options,
+                    allowOther,
+                    question.multiSelect === true,
+                    pseudoOtherIndex,
+                );
+                if (parsed === undefined) {
+                    process.stdout.write(`  ${paint("无效选择", "red")}\n`);
                     continue;
                 }
 
-                selected = indexes.map((index) => question.options[index - 1].id);
-                break;
+                if (allowOther && parsed.requiresNote && parsed.other === undefined) {
+                    let note = "";
+                    while (note.length === 0) {
+                        let noteLine = "";
+                        let noteFailed = false;
+                        try {
+                            noteLine = await rl.question(paint("  备注/自由输入: ", "yellow"));
+                        } catch {
+                            noteFailed = true;
+                        }
+
+                        if (noteFailed) {
+                            cancelRequest();
+                            return;
+                        }
+
+                        note = noteLine.trim();
+                        if (note.length === 0) {
+                            process.stdout.write(paint("  该选项需要补充说明，请重新输入\n", "red"));
+                        }
+                    }
+                    parsed.other = note;
+                }
+
+                choice = parsed;
             }
 
-            answers.push({ questionId: question.id, selected });
+            const answer: UserInputAnswer = {
+                questionId: question.id,
+                selected: choice.selected,
+            };
+            if (choice.other !== undefined) answer.other = choice.other;
+            answers.push(answer);
         }
 
         const result: UserInputResult = { requestId: request.id, answers };
         const resumed = session.respondUserInput(result);
-        process.stdout.write(resumed ? "  submitted\n" : "  (run is no longer waiting for input)\n");
+        process.stdout.write(
+            resumed
+                ? `  ${paint("submitted", "green")}\n`
+                : "  (run is no longer waiting for input)\n",
+        );
     };
 
     session.subscribe((event: SessionEvent) => {
@@ -705,16 +832,16 @@ async function main(): Promise<void> {
             case SessionEventType.ASSISTANT_TOKEN:
                 if (event.isThinking) {
                     if (!thinkingStarted) {
-                        process.stdout.write("thinking: ");
+                        process.stdout.write(paint("thinking: ", "dim"));
                         thinkingStarted = true;
                     }
-                    process.stdout.write(event.token);
+                    process.stdout.write(paint(event.token, "dim"));
                 } else {
                     if (thinkingStarted && !outputStarted) {
                         process.stdout.write("\n");
                     }
                     if (!outputStarted) {
-                        process.stdout.write("assistant: ");
+                        process.stdout.write(paint("assistant: ", ["bold", "green"]));
                         outputStarted = true;
                     }
                     process.stdout.write(event.token);
@@ -729,26 +856,31 @@ async function main(): Promise<void> {
 
             case SessionEventType.ASSISTANT_ATTACHMENT: {
                 process.stdout.write(
-                    `\n[attachment] ${event.name ?? event.attachment.contentHash}`
-                    + (event.mimeType !== undefined ? ` (${event.mimeType})` : "")
+                    `\n${paint("[attachment]", ["bold", "magenta"])} ${event.name ?? event.attachment.contentHash}`
+                    + (event.mimeType !== undefined ? ` ${paint(`(${event.mimeType})`, "dim")}` : "")
                     + "\n",
                 );
                 // 控制台不能直接渲染图片/视频；导出到本地并打印可点击的 file:// 链接
                 void exportAttachmentFile(attachmentManager, event.attachment.contentHash)
                     .then((media) => {
                         if (media === undefined) return;
-                        process.stdout.write(`  ${media.url}\n`);
+                        process.stdout.write(`  ${paint(media.url, ["blue", "underline"])}\n`);
                     })
                     .catch((error: unknown) => {
-                        process.stderr.write(
+                        process.stderr.write(paint(
                             `[attachment] failed to export: ${errorMessage(error)}\n`,
-                        );
+                            "red",
+                            process.stderr,
+                        ));
                     });
                 break;
             }
 
             case SessionEventType.TOOL_CALL_START:
-                process.stdout.write(`\n[tool] ${event.call.name} ${shortJson(event.call.params)}\n`);
+                process.stdout.write(
+                    `\n${paint("[tool]", ["bold", "cyan"])} ${paint(event.call.name, "bold")} `
+                    + `${paint(shortJson(event.call.params), "dim")}\n`,
+                );
                 break;
 
             case SessionEventType.TOOL_CALL_END: {
@@ -756,25 +888,38 @@ async function main(): Promise<void> {
                 const detail = event.result.status.isSuccess
                     ? ""
                     : `: ${shortJson(textOfContent(event.result.content), 300)}`;
-                process.stdout.write(`[tool] ${event.call.name} -> ${status}${detail}\n`);
+                const trust = event.result.trust ?? "unknown";
+                const trustLabel = trust === "trusted"
+                    ? paint("[trusted]", "dim")
+                    : trust === "untrusted"
+                        ? paint("[untrusted]", ["bold", "yellow"])
+                        : paint("[unknown]", "dim");
+                process.stdout.write(
+                    `${paint("[tool]", "cyan")} ${event.call.name} -> `
+                    + `${paint(status, event.result.status.isSuccess ? "green" : ["bold", "red"])} `
+                    + `${trustLabel}`
+                    + `${detail.length > 0 ? paint(detail, "red") : ""}\n`,
+                );
                 break;
             }
 
             case SessionEventType.TOOL_ATTACHMENT: {
                 process.stdout.write(
-                    `\n[tool attachment] ${event.name ?? event.attachment.contentHash}`
-                    + (event.mimeType !== undefined ? ` (${event.mimeType})` : "")
+                    `\n${paint("[tool attachment]", ["bold", "magenta"])} ${event.name ?? event.attachment.contentHash}`
+                    + (event.mimeType !== undefined ? ` ${paint(`(${event.mimeType})`, "dim")}` : "")
                     + "\n",
                 );
                 void exportAttachmentFile(attachmentManager, event.attachment.contentHash)
                     .then((media) => {
                         if (media === undefined) return;
-                        process.stdout.write(`  ${media.url}\n`);
+                        process.stdout.write(`  ${paint(media.url, ["blue", "underline"])}\n`);
                     })
                     .catch((error: unknown) => {
-                        process.stderr.write(
+                        process.stderr.write(paint(
                             `[tool attachment] failed to export: ${errorMessage(error)}\n`,
-                        );
+                            "red",
+                            process.stderr,
+                        ));
                     });
                 break;
             }
@@ -785,9 +930,9 @@ async function main(): Promise<void> {
 
             case SessionEventType.TOOL_PROGRESS:
                 process.stdout.write(
-                    `\n[progress] ${event.call.name} ${event.progress.progress}`
+                    `\n${paint("[progress]", ["dim", "cyan"])} ${event.call.name} ${event.progress.progress}`
                     + (event.progress.total !== undefined ? `/${event.progress.total}` : "")
-                    + (event.progress.message !== undefined ? ` ${event.progress.message}` : "")
+                    + (event.progress.message !== undefined ? ` ${paint(event.progress.message, "dim")}` : "")
                     + "\n",
                 );
                 break;
@@ -797,15 +942,19 @@ async function main(): Promise<void> {
                 break;
 
             case SessionEventType.TOOL_PERMISSION_WARNING:
-                process.stdout.write(`\n[warning] ${event.message}\n`);
+                process.stdout.write(`\n${paint("[warning]", ["bold", "yellow"])} ${paint(event.message, "yellow")}\n`);
                 break;
 
             case SessionEventType.USER_ABORT:
-                process.stdout.write("[canceled]\n");
+                process.stdout.write(`${paint("[canceled]", "yellow")}\n`);
                 break;
 
             case SessionEventType.ERROR:
-                process.stderr.write(`\n[error] ${textOfContent(event.msg)}\n`);
+                process.stderr.write(paint(
+                    `\n[error] ${textOfContent(event.msg)}\n`,
+                    "red",
+                    process.stderr,
+                ));
                 break;
 
             default:
@@ -816,33 +965,34 @@ async function main(): Promise<void> {
     process.on("SIGINT", () => {
         if (session.isBusy) {
             session.cancel();
-            process.stdout.write("\n[canceling current run]\n");
+            process.stdout.write(`\n${paint("[canceling current run]", "yellow")}\n`);
             return;
         }
 
-        process.stdout.write("\nbye\n");
+        process.stdout.write(paint("\nbye\n", "dim"));
         rl.close();
     });
 
-    console.log("Wireclaw console");
-    console.log(`provider:   ${currentProviderRuntime.id} (${currentProviderRuntime.label})`);
-    console.log(`endpoint:   ${currentProviderRuntime.endpoint}`);
-    console.log(`model:      ${currentModel}`);
-    console.log(`permission: ${permission}`);
-    console.log(`workspace:  ${workspace}`);
-    console.log(`files:      ${fileHost.rootDir}`);
-    console.log(`image tools: ${imageTools.length > 0 ? `${imageTools.join(", ")} (${COMFYUI_BASE_URL})` : "disabled"}`);
-    console.log(`mcp:        ${MCP_DISABLED ? "disabled" : MCP_URL}`);
-    console.log("commands:   /exit, /provider [id], /model <name>, /list_models, /tools, /permission [readonly|approval|full]");
+    console.log(paint("Wireclaw console", ["bold", "cyan"]));
+    console.log(`${paint("provider:", "dim")}   ${currentProviderRuntime.id} (${currentProviderRuntime.label})`);
+    console.log(`${paint("endpoint:", "dim")}   ${currentProviderRuntime.endpoint}`);
+    console.log(`${paint("model:", "dim")}      ${paint(currentModel, "bold")}`);
+    console.log(`${paint("permission:", "dim")} ${permission}`);
+    console.log(`${paint("workspace:", "dim")}  ${workspace}`);
+    console.log(`${paint("files:", "dim")}      ${fileHost.rootDir}`);
+    console.log(`${paint("image tools:", "dim")} ${imageTools.length > 0 ? `${imageTools.join(", ")} (${COMFYUI_BASE_URL})` : paint("disabled", "dim")}`);
+    console.log(`${paint("mcp:", "dim")}        ${MCP_DISABLED ? paint("disabled", "dim") : MCP_URL}`);
+    console.log(`${paint("commands:", ["bold", "cyan"])}   /exit, /provider [id], /model <name>, /list_models, /tools, /permission [readonly|approval|full]`);
     console.log("            /upload <media-path>, /attachments, /save_session [path], /restore_session [path]");
-    console.log("note:       /restore_session 会丢弃当前会话数据");
+    console.log("            /system <text>  (only before the session has any conversation)");
+    console.log(`${paint("note:", "yellow")}       /restore_session 会丢弃当前会话数据；/system 仅限空会话`);
     console.log("");
 
     try {
         while (true) {
             let line: string;
             try {
-                line = await rl.question("> ");
+                line = await rl.question(paint("> ", ["bold", "cyan"]));
             } catch {
                 break;
             }
@@ -856,6 +1006,48 @@ async function main(): Promise<void> {
 
                 if (command === "exit") {
                     break;
+                }
+
+                if (command === "system") {
+                    if (session.isBusy) {
+                        console.log(paint("[system] cannot append while running", "yellow"));
+                        continue;
+                    }
+
+                    const history = session.history;
+                    if (history === undefined) {
+                        console.log(paint("[system] no active session", "yellow"));
+                        continue;
+                    }
+
+                    const hasConversation = history.messages.some(
+                        (message) => message.role !== "system",
+                    );
+                    if (hasConversation) {
+                        console.log(paint(
+                            "[system] only available before the session has any user/assistant/tool message",
+                            "yellow",
+                        ));
+                        continue;
+                    }
+
+                    const content = args.join(" ").trim();
+                    if (content.length === 0) {
+                        console.log("usage: /system <text>");
+                        continue;
+                    }
+
+                    try {
+                        session.changeSession(new SessionHistory(
+                            history.id,
+                            [...history.messages, system(content)],
+                            history.isArchived,
+                        ));
+                        console.log(paint(`[system] appended system message (${content.length} chars)`, "green"));
+                    } catch (error) {
+                        errorLine(`[system] ${errorMessage(error)}`);
+                    }
+                    continue;
                 }
 
                 if (command === "provider") {
@@ -895,10 +1087,10 @@ async function main(): Promise<void> {
                         session.switchModel(next.model);
                         currentProviderRuntime = next;
                         currentModel = next.model;
-                        console.log(`provider switched to: ${next.id} (${next.label})`);
+                        console.log(paint(`provider switched to: ${next.id} (${next.label})`, "green"));
                         console.log(`model: ${currentModel}`);
                     } catch (error) {
-                        console.error(`[provider] ${errorMessage(error)}`);
+                        errorLine(`[provider] ${errorMessage(error)}`);
                     }
                     continue;
                 }
@@ -932,9 +1124,9 @@ async function main(): Promise<void> {
                             session.switchModel(modelName);
                             currentModel = modelName;
                             currentProviderRuntime.model = modelName;
-                            console.log(`model switched to: ${currentModel}`);
+                            console.log(paint(`model switched to: ${currentModel}`, "green"));
                         } catch (error) {
-                            console.error(`[model] ${errorMessage(error)}`);
+                            errorLine(`[model] ${errorMessage(error)}`);
                         }
                     }
                     continue;
@@ -949,7 +1141,7 @@ async function main(): Promise<void> {
 
                     try {
                         const models = await modelProvider.initModels();
-                        console.log(`available models (${models.length}):`);
+                        console.log(paint(`available models (${models.length}):`, ["bold", "cyan"]));
                         for (const [index, item] of models.entries()) {
                             const marks: string[] = [];
                             if (item.id === currentModel || item.name === currentModel) marks.push("current");
@@ -967,7 +1159,7 @@ async function main(): Promise<void> {
                             console.log(`  ${String(index + 1).padStart(2)}. ${item.name}${suffix}`);
                         }
                     } catch (error) {
-                        console.error(`[list_models] ${errorMessage(error)}`);
+                        errorLine(`[list_models] ${errorMessage(error)}`);
                     }
                     continue;
                 }
@@ -984,7 +1176,7 @@ async function main(): Promise<void> {
                             console.log("[permission] cannot change while running");
                         } else {
                             permission = next;
-                            console.log(`permission switched to: ${permission}`);
+                            console.log(paint(`permission switched to: ${permission}`, "green"));
                         }
                     }
                     continue;
@@ -993,7 +1185,7 @@ async function main(): Promise<void> {
                 if (command === "tools") {
                     try {
                         const tools = [...await registry.listTools(), ...HOST_TOOL_DEFINITIONS];
-                        console.log(`available tools (${tools.length}):`);
+                        console.log(paint(`available tools (${tools.length}):`, ["bold", "cyan"]));
                         for (const tool of tools) {
                             const marks: string[] = [];
                             if (tool.annotations?.readOnlyHint === true) marks.push("readonly");
@@ -1003,7 +1195,7 @@ async function main(): Promise<void> {
                             console.log(`  - ${tool.name} (${tool.source?.providerId ?? "host"})${suffix}`);
                         }
                     } catch (error) {
-                        console.error(`[tools] ${errorMessage(error)}`);
+                        errorLine(`[tools] ${errorMessage(error)}`);
                     }
                     continue;
                 }
@@ -1098,10 +1290,10 @@ async function main(): Promise<void> {
                             pendingAttachments.push(file.contentHash);
                         }
 
-                        console.log(`[upload] ${file.name} (${mimeType}, ${file.size} bytes) hash=${file.contentHash}`);
-                        console.log(`[upload] pending attachments: ${pendingAttachments.length}`);
+                        console.log(paint(`[upload] ${file.name} (${mimeType}, ${file.size} bytes) hash=${file.contentHash}`, "green"));
+                        console.log(paint(`[upload] pending attachments: ${pendingAttachments.length}`, "dim"));
                     } catch (error) {
-                        console.error(`[upload] ${errorMessage(error)}`);
+                        errorLine(`[upload] ${errorMessage(error)}`);
                     }
                     continue;
                 }
@@ -1113,23 +1305,23 @@ async function main(): Promise<void> {
                         continue;
                     }
 
-                    const hashes = collectAttachmentHashes(history.messages);
+                    const hashes = collectAttachmentHashes(history.messages, { includeToolParams: true });
                     if (hashes.length === 0) {
                         console.log("[attachments] no attachments in the current session");
                         continue;
                     }
 
-                    console.log(`attachments (${hashes.length}):`);
+                    console.log(paint(`attachments (${hashes.length}):`, ["bold", "cyan"]));
                     for (const [index, contentHash] of hashes.entries()) {
                         try {
                             const media = await exportAttachmentFile(attachmentManager, contentHash);
                             if (media === undefined) {
-                                console.log(`  ${index + 1}. ${contentHash} (missing in attachment store)`);
+                                console.log(paint(`  ${index + 1}. ${contentHash} (missing in attachment store)`, "red"));
                                 continue;
                             }
                             console.log(`  ${index + 1}. ${formatExportedMedia(media)}`);
                         } catch (error) {
-                            console.error(`  ${index + 1}. ${contentHash}: ${errorMessage(error)}`);
+                            errorLine(`  ${index + 1}. ${contentHash}: ${errorMessage(error)}`);
                         }
                     }
                     continue;
@@ -1150,9 +1342,34 @@ async function main(): Promise<void> {
                         const data = SessionSerializer.serialize(history);
                         await mkdir(dirname(target), { recursive: true });
                         await writeFile(target, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-                        console.log(`[save_session] saved ${data.messages.length} messages to ${target}`);
+
+                        const metas: StoredAttachmentMeta[] = [];
+                        for (const contentHash of collectAttachmentHashes(history.messages, {
+                            includeToolParams: true,
+                        })) {
+                            try {
+                                const meta = await attachmentManager.getMeta(contentHash);
+                                if (meta !== undefined) metas.push(meta);
+                            } catch {
+                                // 单个附件元数据读取失败不影响会话保存
+                            }
+                        }
+                        if (metas.length > 0) {
+                            const manifest = SessionAttachmentManifestSerializer.serialize(metas);
+                            await writeFile(
+                                `${target}${ATTACHMENT_MANIFEST_SUFFIX}`,
+                                `${JSON.stringify(manifest, null, 2)}\n`,
+                                "utf8",
+                            );
+                        }
+
+                        console.log(paint(`[save_session] saved ${data.messages.length} messages to ${target}`, "green"));
+                        console.log(
+                            `[save_session] attachment metadata: ${metas.length}`
+                            + (metas.length > 0 ? ` -> ${target}${ATTACHMENT_MANIFEST_SUFFIX}` : ""),
+                        );
                     } catch (error) {
-                        console.error(`[save_session] ${errorMessage(error)}`);
+                        errorLine(`[save_session] ${errorMessage(error)}`);
                     }
                     continue;
                 }
@@ -1170,17 +1387,69 @@ async function main(): Promise<void> {
                         // Windows 编辑器可能写入 UTF-8 BOM，先剥掉
                         const raw = (await readFile(target, "utf8")).replace(/^\uFEFF/, "");
                         const restored = SessionSerializer.deserialize(JSON.parse(raw) as unknown);
+
+                        let manifestCount = 0;
+                        try {
+                            const manifestRaw = (await readFile(
+                                `${target}${ATTACHMENT_MANIFEST_SUFFIX}`,
+                                "utf8",
+                            )).replace(/^\uFEFF/, "");
+                            const metas = SessionAttachmentManifestSerializer.deserialize(
+                                JSON.parse(manifestRaw) as unknown,
+                            );
+                            for (const meta of metas) {
+                                attachmentManager.registerRecoveryMeta(meta);
+                            }
+                            manifestCount = metas.length;
+                        } catch (error) {
+                            if (isMissingFileError(error)) {
+                                console.log(paint("[restore_session] no attachment metadata sidecar", "dim"));
+                            } else {
+                                console.log(paint(
+                                    `[restore_session] attachment metadata skipped: ${errorMessage(error)}`,
+                                    "yellow",
+                                ));
+                            }
+                        }
+
                         session.changeSession(restored);
                         pendingAttachments = [];
-                        console.log(`[restore_session] loaded ${restored.messages.length} messages from ${target}`);
-                        console.log("[restore_session] current session data discarded");
+
+                        const hashes = collectAttachmentHashes(restored.messages, {
+                            includeToolParams: true,
+                        });
+                        const availability = await attachmentManager.inspect(hashes);
+                        const present = availability.filter(item => item.status === "present").length;
+                        const damaged = availability.filter(item => item.status !== "present");
+
+                        console.log(paint(`[restore_session] loaded ${restored.messages.length} messages from ${target}`, "green"));
+                        console.log(paint(
+                            `[restore_session] attachments: ${present}/${hashes.length} present`
+                            + (manifestCount > 0 ? `, metadata entries: ${manifestCount}` : ""),
+                            damaged.length > 0 ? "yellow" : "green",
+                        ));
+                        for (const item of damaged) {
+                            const name = item.meta?.name !== undefined ? ` (${item.meta.name})` : "";
+                            console.log(paint(`  - ${item.status}: ${item.contentHash}${name}`, "red"));
+                            if (item.meta?.sourcePaths.length) {
+                                console.log(paint(`    source: ${item.meta.sourcePaths.join(", ")}`, "dim"));
+                            }
+                        }
+                        if (damaged.length > 0) {
+                            console.log(paint(
+                                "[restore_session] missing historical attachments will be sent as "
+                                + "\"[attachment unavailable: <hash>]\"; re-upload the same file to restore it.",
+                                "yellow",
+                            ));
+                        }
+                        console.log(paint("[restore_session] current session data discarded", "dim"));
                     } catch (error) {
-                        console.error(`[restore_session] ${errorMessage(error)}`);
+                        errorLine(`[restore_session] ${errorMessage(error)}`);
                     }
                     continue;
                 }
 
-                console.log(`unknown command: /${command}`);
+                console.log(paint(`unknown command: /${command}`, "yellow"));
                 continue;
             }
 
@@ -1202,16 +1471,21 @@ async function main(): Promise<void> {
                 const run = await session.run(content, { tools: registry, permission });
 
                 if (run.status === RunStatus.Completed) {
-                    process.stdout.write(
+                    process.stdout.write(paint(
                         `\n[completed, ${run.pendingUsage.totalTokens} tokens, stop=${run.stopReason ?? "undefined"}]\n`,
-                    );
+                        ["bold", "green"],
+                    ));
                 } else if (run.status === RunStatus.Failed) {
-                    process.stderr.write(`\n[failed] ${errorMessage(run.error)}\n`);
+                    process.stderr.write(paint(
+                        `\n[failed] ${errorMessage(run.error)}\n`,
+                        ["bold", "red"],
+                        process.stderr,
+                    ));
                 } else {
-                    process.stdout.write(`\n[${run.status}]\n`);
+                    process.stdout.write(paint(`\n[${run.status}]\n`, "yellow"));
                 }
             } catch (error) {
-                console.error(`[run] ${errorMessage(error)}`);
+                errorLine(`[run] ${errorMessage(error)}`);
             }
         }
     } finally {
@@ -1222,6 +1496,6 @@ async function main(): Promise<void> {
 }
 
 main().catch(error => {
-    console.error(error instanceof Error ? error.stack ?? error.message : String(error));
+    errorLine(error instanceof Error ? error.stack ?? error.message : String(error));
     process.exitCode = 1;
 });

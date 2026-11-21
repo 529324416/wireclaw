@@ -413,11 +413,10 @@ export abstract class ModelProvider{
         }
 
         // 验证网络连接是否正常（失败时直接抛出异常，由上游控制器捕捉，并取消拉取模型）
-        this._fetchCount ++;
+        this._fetchCount++;
         this._pendingModels = (async () => {
             try {
                 await this.validateNetwork();
-                this._fetchCount++;
                 const models = await this.fetchModels();
                 this._availableModels = this._applyOverrides(models);
                 onloaded?.(this._availableModels);

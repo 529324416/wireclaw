@@ -84,9 +84,15 @@ export function isToolError(e: unknown): e is ToolError {
         && typeof candidate.retryable === "boolean";
 }
 
-/** duck typing 判断，避免跨 bundle 时 instanceof 失效 */
+/** duck typing 判断，避免跨 bundle 时 instanceof 失效
+ * @note 必须同时校验 name；ToolError 也有 type 字段，不能只靠 Error + type 判断。
+ */
 export function isSessionError(e: unknown): e is SessionError {
-    return e instanceof Error && typeof (e as { type?: unknown }).type === 'string';
+    if (typeof e !== "object" || e === null) return false;
+
+    const candidate = e as { name?: unknown; type?: unknown };
+    return candidate.name === "SessionError"
+        && typeof candidate.type === "string";
 }
 
 /** 把任意 unknown 错误归一化为 SessionError */

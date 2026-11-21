@@ -31,6 +31,7 @@ const readFileDefinition: ToolDefinition = {
     name: "readFile",
     title: "Read File",
     description: "读取工作区内的 UTF-8 文本文件。超出读取上限时会截断并给出提示。",
+    defaultTrust: "unknown",
     inputSchema: {
         type: "object",
         properties: {
@@ -52,6 +53,7 @@ const writeFileDefinition: ToolDefinition = {
     name: "writeFile",
     title: "Write File",
     description: "写入工作区内的 UTF-8 文本文件（覆盖写入，父目录会自动创建）。调用前需要人工审批。",
+    defaultTrust: "trusted",
     inputSchema: {
         type: "object",
         properties: {

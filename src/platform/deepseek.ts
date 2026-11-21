@@ -4,7 +4,7 @@ import type { AttachmentFile } from "../session/attachment";
 import { SessionError, SessionErrorType } from "../session/error";
 import type { Message } from "../session";
 import { CloudFileManager, ModelProvider, normalizeInputTypes } from "../session/protocol";
-import type { ModelInfo } from "../session";
+import type { ChatModelCapabilities, ModelInfo } from "../session";
 import type {
     ChatOptions,
     RemoteFileRef,
@@ -436,9 +436,14 @@ export class DeepSeekProvider extends OpenAICompatibleProvider {
         payload: Record<string, unknown>,
         options: SessionRuntimeOptions,
         turn?: ChatOptions,
+        chatCapabilities?: ChatModelCapabilities,
     ): void {
-        super.decoratePayload(payload, options, turn);
-        applyThinkingOptions(payload, options);
+        super.decoratePayload(payload, options, turn, chatCapabilities);
+
+        // 模型明确声明 thinking:false 时不发送思考参数；能力未知时保持旧行为。
+        if (chatCapabilities?.thinking !== false) {
+            applyThinkingOptions(payload, options);
+        }
     }
 
     protected override checkChatOptions(

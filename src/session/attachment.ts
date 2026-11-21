@@ -1,12 +1,104 @@
-import { sha256 } from "../base";
+import { sha256, WireclawError } from "../base";
+import type { AssistantMessage, Message } from "./message";
+import { ChatRoleAssistant } from "./type";
 import type { FileContent } from "./type";
 
 /** 内容指纹格式：SHA-256 小写十六进制 */
 const CONTENT_HASH_PATTERN = /^[a-f0-9]{64}$/;
 
+/** 附件错误码 */
+export const AttachmentFileErrorCode = {
+    Missing: "Attachment missing",
+    Corrupted: "Attachment corrupted",
+    RecoveryFailed: "Attachment recovery failed",
+    Storage: "Attachment storage failure",
+    UnsupportedType: "Unsupported attachment type",
+    LimitExceeded: "Attachment limit exceeded",
+    Network: "Attachment network failure",
+} as const;
+export type AttachmentFileErrorCode =
+    (typeof AttachmentFileErrorCode)[keyof typeof AttachmentFileErrorCode];
+
+/** 附件系统统一错误 */
+export class AttachmentFileError extends WireclawError {
+
+    readonly code: AttachmentFileErrorCode;
+    readonly contentHash?: string;
+    readonly sourcePaths: readonly string[];
+    readonly origin?: unknown;
+
+    constructor(
+        code: AttachmentFileErrorCode,
+        message: string,
+        options: {
+            contentHash?: string;
+            sourcePaths?: readonly string[];
+            origin?: unknown;
+        } = {},
+    ){
+        super(message);
+        this.name = "AttachmentFileError";
+        this.code = code;
+        this.contentHash = options.contentHash;
+        this.sourcePaths = normalizeSourcePaths(options.sourcePaths);
+        this.origin = options.origin;
+    }
+}
+
+/** duck typing 判断附件错误，避免跨 bundle 时 instanceof 失效 */
+export function isAttachmentFileError(e: unknown): e is AttachmentFileError {
+    if (typeof e !== "object" || e === null) return false;
+    const candidate = e as { name?: unknown; code?: unknown };
+    return candidate.name === "AttachmentFileError" && typeof candidate.code === "string";
+}
+
 /** 判断字符串是否是合法的内容指纹 */
 export function isContentHash(value: string): boolean{
     return CONTENT_HASH_PATTERN.test(value);
+}
+
+/** 收集消息中引用的附件指纹
+ * @param includeToolParams 是否扫描 assistant toolCall 参数中的 contentHash
+ * @note 参考图工具的 references 只存在于调用参数中；清理/清单场景需要开启。
+ *       解析发送附件时保持默认 false，只处理真正的消息附件。
+ */
+export function collectAttachmentHashes(
+    messages: readonly Message[],
+    options: { includeToolParams?: boolean } = {},
+): string[]{
+    const hashes = new Set<string>();
+
+    for (const message of messages){
+        if (typeof message.content !== "string"){
+            for (const part of message.content){
+                if (part.type === "attachment") hashes.add(part.attachment.contentHash);
+            }
+        }
+
+        if (options.includeToolParams === true && message.role === ChatRoleAssistant){
+            for (const call of (message as AssistantMessage).toolCalls){
+                collectHashStrings(call.params, hashes);
+            }
+        }
+    }
+
+    return [...hashes];
+}
+
+function collectHashStrings(value: unknown, hashes: Set<string>): void{
+    if (typeof value === "string"){
+        if (isContentHash(value)) hashes.add(value);
+        return;
+    }
+
+    if (Array.isArray(value)){
+        for (const item of value) collectHashStrings(item, hashes);
+        return;
+    }
+
+    if (typeof value === "object" && value !== null){
+        for (const item of Object.values(value)) collectHashStrings(item, hashes);
+    }
 }
 
 /** 规范化原始路径组：去空、去重、保持顺序 */
