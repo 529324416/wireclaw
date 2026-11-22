@@ -6,6 +6,7 @@ import type {
     JsonObject,
     JsonValue,
     NodeInputValues,
+    NodeRequirement,
 } from "./type";
 
 /** 节点类型定义；由宿主注册，JSON 中只保存 type + typeVersion */
@@ -18,6 +19,9 @@ export type NodeTypeDefinition = {
 
     /** 供设计器生成参数表单的 JSON Schema */
     configSchema?: JsonObject;
+
+    /** 节点类型的静态外部依赖 */
+    requirements?: readonly NodeRequirement[];
 
     create: (
         id: string,
@@ -37,6 +41,7 @@ export type NodeCreateInput = {
     config?: JsonValue;
     inputs?: NodeInputValues;
     ui?: JsonObject;
+    requirements?: readonly NodeRequirement[];
 };
 
 /**
@@ -151,6 +156,14 @@ export class NodeTypeRegistry{
                     + `but its type is registered as ${String(definition.version)}`,
                 { nodeId: input.id },
             );
+        }
+
+        const requirements = [
+            ...(definition.requirements ?? []),
+            ...(input.requirements ?? []),
+        ];
+        if (requirements.length > 0){
+            node.setRequirements(requirements);
         }
 
         return node;

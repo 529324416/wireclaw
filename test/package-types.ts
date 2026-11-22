@@ -3,12 +3,19 @@ import {
     Graph,
     GraphRun,
     McpToolProvider,
+    NodePresetLibrary,
     NodeTypeRegistry,
     ToolSet,
     createBuiltinNodeRegistry,
     createNewSession,
+    instantiateNodePreset,
 } from "wireclaw";
-import type { GraphDocument, GraphHost, GraphRunResult } from "wireclaw";
+import type {
+    GraphDocument,
+    GraphHost,
+    GraphRunResult,
+    NodePresetDocument,
+} from "wireclaw";
 import { LocalFileHost, readLocalSourcePath } from "wireclaw/node";
 import {
     LocalToolProvider,
@@ -22,12 +29,15 @@ void AttachmentFileManager;
 void Graph;
 void GraphRun;
 void McpToolProvider;
+void NodePresetLibrary;
 void NodeTypeRegistry;
 void ToolSet;
 void createBuiltinNodeRegistry;
 void createNewSession;
+void instantiateNodePreset;
 void (null as unknown as GraphHost);
 void (null as unknown as GraphRunResult);
+void (null as unknown as NodePresetDocument);
 void LocalFileHost;
 void readLocalSourcePath;
 void LocalToolProvider;

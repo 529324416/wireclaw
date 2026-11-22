@@ -857,9 +857,9 @@ await registry.closeAll();
 - stdio 传输由 `src/client` 提供，已通过实机联调（Python 子进程）。
 - 更多待办见根目录 `todo.md`。
 
-## Harness Graph（Step 1–3：对象模型、运行时、ToolSet 与流式）
+## Harness Graph（Step 1–3 + A1/A2：对象模型、运行时与节点预设）
 
-当前状态：Graph 对象模型、校验、JSON 序列化、运行时、ToolSet、流式端口、EventTrigger，以及内建 input / output / constant / model / model.call / agent.run / toolset / choice / eventTrigger / log 节点已实现；调度级 BranchNode、外部暂停/恢复、节点库预设尚未实现。
+当前状态：Graph 对象模型、校验、JSON 序列化、运行时、ToolSet、流式端口、EventTrigger、节点预设与依赖校验，以及内建 input / output / constant / model / model.call / agent.run / toolset / choice / eventTrigger / log 节点已实现；调度级 BranchNode、外部暂停/恢复、预设序列化迁移尚未实现。
 
 ```text
 src/harness/
@@ -882,6 +882,11 @@ src/harness/
     document.ts       GraphDocument / NodeDocument
     serializer.ts     serializeGraph / deserializeGraph
     plugin.ts         序列化插件接口（占位，供版本迁移/私有字段使用）
+  preset/
+    type.ts           NodePresetDocument / NodePresetParameter
+    validate.ts       preset 解析、参数路径覆盖
+    instantiate.ts    instantiateNodePreset
+    library.ts        NodePresetLibrary
   node/               内建节点：input / output / constant / model / model.call / agent.run / toolset / choice / eventTrigger / log
 ```
 
@@ -906,6 +911,19 @@ src/harness/
 - **ChoiceNode**：`core.choice` 是值选择，`whenTrue` / `whenFalse` 两条上游都会执行；调度级 `BranchNode` 尚未实现。
 - **事件**：run/node 生命周期事件自动发出；`ctx.emit` 推流，`ctx.publish` 发 `custom` 事件；外部通过 `Graph.run({ listener })` 消费。
 
+### 节点预设与依赖校验
+
+- `NodePresetDocument` 是节点库条目，不是图内节点实例：没有图内唯一 id，带 `presetId` / 名称 / 标签 / 参数声明 / 依赖声明。
+- `parameters[].path` 是 config 的点路径；实例化时按路径覆盖，未声明参数名会报错，缺失 required 参数报 `MissingParameterDependency`。
+- `instantiateNodePreset()` 通过 `NodeTypeRegistry` 创建节点，并保留预设与节点类型自身的 `requirements`。
+- `NodeRequirement` 支持 `tool` / `provider` / `model` / `parameter`；`RequirementCatalog` 由宿主或编辑器提供。
+- 校验时机：
+  1. `instantiateNodePreset(..., { available })`；
+  2. `Graph.validate({ requirements })`；
+  3. `GraphRun` 启动前：工具对照宿主 `ToolRegistry`，Provider 对照 `resolveProvider`，参数对照 `GraphHost.parameters`；缺失直接 fail-fast。
+- `NodeDocument` 会保存 `requires`，因此预设实例化后的图 JSON 仍保留依赖声明。
+- 当前 run 启动检查使用宿主全局 ToolRegistry；节点级 ToolSet 进一步排除了某个工具时，尚不会在启动前报“该节点 ToolSet 不包含依赖工具”，这一步留到后续。
+
 ### 最小可运行示例
 
 `examples/harness/minimal.ts` 用代码创建 `InputNode -> UppercaseNode -> OutputNode` 并连边；`UppercaseNode` 同时是自定义节点示例。运行：
@@ -916,7 +934,7 @@ npm run example:harness
 
 `test/harness-minimal.ts` 用同一张图做离线回归。该案例是后续 Landing 的 canary，不依赖 Provider / 外部服务。
 
-尚未实现：调度级 BranchNode、图级暂停/恢复/checkpoint、`multiple` 输入 fan-in（运行时明确报 `NotImplemented`）、流背压/限流、节点库/预设封装、工具依赖静态校验。
+尚未实现：调度级 BranchNode、图级暂停/恢复/checkpoint、`multiple` 输入 fan-in（运行时明确报 `NotImplemented`）、流背压/限流、预设的导出/迁移、GraphEditor 节点目录、节点级 ToolSet 与依赖的启动前联合校验。
 
 ## ComfyUI Qwen-Image Tool
 

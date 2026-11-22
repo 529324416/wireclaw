@@ -141,6 +141,7 @@ export class GraphRun{
 
             this._graph.assertValid();
             this._outputNode = this._selectOutputNode();
+            await this._validateRequirements();
             this._prepareExecution();
             await this._execute();
         }catch(error){
@@ -169,6 +170,81 @@ export class GraphRun{
             );
         }
         return outputs[0];
+    }
+
+    private async _validateRequirements(): Promise<void>{
+        const nodes = this._graph.nodes.filter(
+            (node) => node.requirements.length > 0,
+        );
+        if (nodes.length === 0) return;
+
+        const needsTools = nodes.some((node) =>
+            node.requirements.some((requirement) => requirement.kind === "tool"));
+        const toolNames = new Set<string>();
+        if (needsTools && this._host.tools !== undefined){
+            const tools = await this._host.tools.listTools(this._abort.signal);
+            for (const tool of tools) toolNames.add(tool.name);
+        }
+
+        const parameters = this._host.parameters ?? {};
+
+        for (const node of nodes){
+            for (const requirement of node.requirements){
+                switch (requirement.kind){
+                    case "tool":
+                        if (!toolNames.has(requirement.name)){
+                            throw new HarnessError(
+                                HarnessErrorCode.MissingToolDependency,
+                                `Node "${node.id}" requires tool "${requirement.name}", but it is not available`,
+                                { nodeId: node.id },
+                            );
+                        }
+                        break;
+
+                    case "provider":
+                        if (this._host.resolveProvider(requirement.providerId) === undefined){
+                            throw new HarnessError(
+                                HarnessErrorCode.MissingProviderDependency,
+                                `Node "${node.id}" requires provider "${requirement.providerId}", but it is not available`,
+                                { nodeId: node.id },
+                            );
+                        }
+                        break;
+
+                    case "model": {
+                        const provider = this._host.resolveProvider(requirement.providerId);
+                        if (provider === undefined){
+                            throw new HarnessError(
+                                HarnessErrorCode.MissingProviderDependency,
+                                `Node "${node.id}" requires provider "${requirement.providerId}", but it is not available`,
+                                { nodeId: node.id },
+                            );
+                        }
+
+                        const models = provider.modelProvider?.availableModels;
+                        if (models !== null && models !== undefined
+                            && !models.some((model) => model.id === requirement.modelId)){
+                            throw new HarnessError(
+                                HarnessErrorCode.MissingModelDependency,
+                                `Node "${node.id}" requires model "${requirement.providerId}/${requirement.modelId}", but it is not available`,
+                                { nodeId: node.id },
+                            );
+                        }
+                        break;
+                    }
+
+                    case "parameter":
+                        if (!Object.prototype.hasOwnProperty.call(parameters, requirement.name)){
+                            throw new HarnessError(
+                                HarnessErrorCode.MissingParameterDependency,
+                                `Node "${node.id}" requires parameter "${requirement.name}", but it is not provided`,
+                                { nodeId: node.id },
+                            );
+                        }
+                        break;
+                }
+            }
+        }
     }
 
     private _prepareExecution(): void{

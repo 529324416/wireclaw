@@ -108,6 +108,40 @@ export type GraphEventDeclaration = {
     payload?: PortValueType;
 };
 
+/** 节点/预设声明的外部依赖；用于实例化、图校验和 run 启动前检查 */
+export type NodeRequirement =
+    | { kind: "tool"; name: string }
+    | { kind: "provider"; providerId: string }
+    | { kind: "model"; providerId: string; modelId: string }
+    | { kind: "parameter"; name: string };
+
+/** 宿主/编辑器可提供的依赖目录；缺省的字段表示该类别不可校验 */
+export type RequirementCatalog = {
+    tools?: readonly string[];
+    providers?: readonly string[];
+    models?: readonly { providerId: string; modelId: string }[];
+    parameters?: readonly string[];
+};
+
+export function isNodeRequirement(value: unknown): value is NodeRequirement{
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+    const record = value as Record<string, unknown>;
+
+    switch (record.kind){
+        case "tool":
+            return typeof record.name === "string" && record.name.length > 0;
+        case "provider":
+            return typeof record.providerId === "string" && record.providerId.length > 0;
+        case "model":
+            return typeof record.providerId === "string" && record.providerId.length > 0
+                && typeof record.modelId === "string" && record.modelId.length > 0;
+        case "parameter":
+            return typeof record.name === "string" && record.name.length > 0;
+        default:
+            return false;
+    }
+}
+
 /* ---------------------------------------------------------------------------
  * 运行时判断
  * ------------------------------------------------------------------------- */

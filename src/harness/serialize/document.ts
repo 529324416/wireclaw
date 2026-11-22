@@ -5,6 +5,7 @@ import type {
     JsonObject,
     JsonValue,
     NodeInputValues,
+    NodeRequirement,
     ToolSetSpec,
 } from "../graph/type";
 
@@ -16,6 +17,7 @@ export type NodeDocument = {
     config?: JsonValue;
     inputs?: NodeInputValues;
     ui?: JsonObject;
+    requires?: NodeRequirement[];
 };
 
 /** Graph 的纯 JSON 文档；运行时不直接消费它，先反序列化为 Graph */

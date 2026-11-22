@@ -22,6 +22,8 @@ assert.equal("createBuiltinNodeRegistry" in root, true);
 assert.equal("ToolSet" in root, true);
 assert.equal("EventTriggerNode" in root, true);
 assert.equal("ChoiceNode" in root, true);
+assert.equal("NodePresetLibrary" in root, true);
+assert.equal("instantiateNodePreset" in root, true);
 assert.equal("LocalToolProvider" in root, false, "core must not expose local tools");
 assert.equal("McpStdioTransport" in root, false, "core must not expose stdio transport");
 

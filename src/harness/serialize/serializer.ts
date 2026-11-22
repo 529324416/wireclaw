@@ -13,8 +13,15 @@ import type {
     JsonObject,
     JsonValue,
     NodeInputValues,
+    NodeRequirement,
+    RequirementCatalog,
 } from "../graph/type";
-import { isHarnessValue, isPortValueType, isToolSetSpec } from "../graph/type";
+import {
+    isHarnessValue,
+    isNodeRequirement,
+    isPortValueType,
+    isToolSetSpec,
+} from "../graph/type";
 import type { GraphDocument, NodeDocument } from "./document";
 
 export type GraphDeserializeOptions = {
@@ -22,6 +29,9 @@ export type GraphDeserializeOptions = {
 
     /** 默认 true；编辑器可以设为 false 载入未完成的草稿 */
     validate?: boolean;
+
+    /** 反序列化校验时可用的依赖目录 */
+    requirements?: RequirementCatalog;
 };
 
 /** 把 Graph 对象序列化为纯 JSON 文档 */
@@ -69,6 +79,12 @@ export function serializeGraph(graph: Graph): GraphDocument{
                     );
                 }
                 nodeDocument.ui = cloneJson(node.ui) as JsonObject;
+            }
+
+            if (node.requirements.length > 0){
+                nodeDocument.requires = cloneJson(
+                    node.requirements,
+                ) as NodeRequirement[];
             }
 
             return nodeDocument;
@@ -121,7 +137,15 @@ export function deserializeGraph(
     options: GraphDeserializeOptions,
 ): Graph{
     const document = parseGraphDocument(value);
-    const nodes = document.nodes.map((node) => options.registry.createNode(node));
+    const nodes = document.nodes.map((node) => options.registry.createNode({
+        id: node.id,
+        type: node.type,
+        typeVersion: node.typeVersion,
+        config: node.config,
+        inputs: node.inputs,
+        ui: node.ui,
+        requirements: node.requires,
+    }));
     const edges = document.edges.map((edge) => Edge.fromJSON(edge));
 
     const graph = new Graph(nodes, edges, {
@@ -135,7 +159,11 @@ export function deserializeGraph(
         ui: document.ui,
     });
 
-    if (options.validate !== false) graph.assertValid();
+    if (options.validate !== false){
+        graph.assertValid(options.requirements === undefined
+            ? {}
+            : { requirements: options.requirements });
+    }
     return graph;
 }
 
@@ -232,6 +260,18 @@ function parseNodeDocument(value: unknown, index: number): NodeDocument{
 
     if (value.ui !== undefined){
         node.ui = readJsonObject(value.ui, `${field}.ui`);
+    }
+
+    if (value.requires !== undefined){
+        node.requires = readArray(value.requires, `${field}.requires`)
+            .map((requirement, requirementIndex) =>{
+                if (!isNodeRequirement(requirement)){
+                    throw invalidDocument(
+                        `${field}.requires[${String(requirementIndex)}] is not a valid NodeRequirement`,
+                    );
+                }
+                return cloneJson(requirement) as NodeRequirement;
+            });
     }
 
     return node;

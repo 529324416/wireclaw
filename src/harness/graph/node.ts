@@ -12,6 +12,7 @@ import type {
     ModelBinding,
     NodeInputValues,
     NodeOutputValues,
+    NodeRequirement,
     OutputPortSpec,
     ToolSetSpec,
 } from "./type";
@@ -92,12 +93,24 @@ export interface NodeContext{
  */
 export abstract class GraphNode{
 
+    private _requirements: readonly NodeRequirement[] = [];
+
     constructor(
         readonly id: string,
         readonly config: JsonValue | undefined = undefined,
         readonly inputDefaults: NodeInputValues = {},
         readonly ui: JsonObject | undefined = undefined,
     ){}
+
+    /** 节点声明的外部依赖；由 NodeTypeDefinition、预设或反序列化写入 */
+    get requirements(): readonly NodeRequirement[]{
+        return this._requirements;
+    }
+
+    /** 由 Registry / 预设实例化写入；业务代码通常不需要调用 */
+    setRequirements(requirements: readonly NodeRequirement[]): void{
+        this._requirements = [...requirements];
+    }
 
     /** 节点类型 ID，例如 core.model.call */
     abstract readonly type: string;

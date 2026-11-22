@@ -37,6 +37,9 @@ export type GraphHost = {
         nodeId: string,
     ) => MaybePromise<UserInputResult>;
 
+    /** 运行参数；用于校验 NodeRequirement(kind: "parameter") */
+    parameters?: Readonly<Record<string, unknown>>;
+
     /** 节点日志出口 */
     log?: (
         level: "debug" | "info" | "warn" | "error",

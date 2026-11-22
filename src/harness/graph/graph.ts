@@ -8,6 +8,7 @@ import type { GraphDocument } from "../serialize/document";
 import type { GraphDeserializeOptions } from "../serialize/serializer";
 import { deserializeGraph, serializeGraph } from "../serialize/serializer";
 import { Edge } from "./edge";
+import { findMissingRequirement } from "./requirements";
 import type { GraphNode } from "./node";
 import {
     isHarnessValue,
@@ -23,8 +24,14 @@ import type {
     InputPortSpec,
     JsonObject,
     OutputPortSpec,
+    RequirementCatalog,
     ToolSetSpec,
 } from "./type";
+
+export type GraphValidateOptions = {
+    /** 提供可用于校验节点依赖的工具/Provider/模型/参数目录 */
+    requirements?: RequirementCatalog;
+};
 
 export type GraphOptions = {
     id?: string;
@@ -80,7 +87,7 @@ export class Graph{
     }
 
     /** 返回全部可定位的校验问题；不抛异常，供设计器逐条展示 */
-    validate(): readonly HarnessIssue[]{
+    validate(options: GraphValidateOptions = {}): readonly HarnessIssue[]{
         const issues: HarnessIssue[] = [];
         const nodeById = new Map<string, GraphNode>();
 
@@ -247,12 +254,29 @@ export class Graph{
                 message: "Graph toolSet is not a valid ToolSetSpec",
             });
         }
+
+        if (options.requirements !== undefined){
+            for (const node of this.nodes){
+                const missing = findMissingRequirement(
+                    node.requirements,
+                    options.requirements,
+                    node.id,
+                );
+                if (missing !== undefined){
+                    issues.push({
+                        code: missing.code,
+                        message: missing.message,
+                        nodeId: node.id,
+                    });
+                }
+            }
+        }
         return issues;
     }
 
     /** 校验失败时抛出 HarnessError，issues 保留全部问题 */
-    assertValid(): void{
-        const issues = this.validate();
+    assertValid(options: GraphValidateOptions = {}): void{
+        const issues = this.validate(options);
         if (issues.length === 0) return;
 
         const first = issues[0];
