@@ -7,6 +7,7 @@
   "include": [
     "src/**/*.ts",
     "tools/**/*.ts",
+    "examples/**/*.ts",
     "test/**/*.ts",
     "client.ts"
   ],

@@ -906,6 +906,16 @@ src/harness/
 - **ChoiceNode**：`core.choice` 是值选择，`whenTrue` / `whenFalse` 两条上游都会执行；调度级 `BranchNode` 尚未实现。
 - **事件**：run/node 生命周期事件自动发出；`ctx.emit` 推流，`ctx.publish` 发 `custom` 事件；外部通过 `Graph.run({ listener })` 消费。
 
+### 最小可运行示例
+
+`examples/harness/minimal.ts` 用代码创建 `InputNode -> UppercaseNode -> OutputNode` 并连边；`UppercaseNode` 同时是自定义节点示例。运行：
+
+```bash
+npm run example:harness
+```
+
+`test/harness-minimal.ts` 用同一张图做离线回归。该案例是后续 Landing 的 canary，不依赖 Provider / 外部服务。
+
 尚未实现：调度级 BranchNode、图级暂停/恢复/checkpoint、`multiple` 输入 fan-in（运行时明确报 `NotImplemented`）、流背压/限流、节点库/预设封装、工具依赖静态校验。
 
 ## ComfyUI Qwen-Image Tool
