@@ -5,4 +5,5 @@ export * from "./graph";
 export * from "./runtime";
 export * from "./node";
 export * from "./preset";
+export * from "./editor";
 export * from "./serialize";

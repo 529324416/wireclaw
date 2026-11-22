@@ -23,6 +23,7 @@ export const HarnessErrorCode = {
     MissingValue: "missing_value",
     NodeExecutionFailed: "node_execution_failed",
     InvalidPreset: "invalid_preset",
+    UnsupportedPresetVersion: "unsupported_preset_version",
     MissingToolDependency: "missing_tool_dependency",
     MissingProviderDependency: "missing_provider_dependency",
     MissingModelDependency: "missing_model_dependency",
