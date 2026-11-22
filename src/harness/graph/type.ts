@@ -31,6 +31,9 @@ export type InputPortSpec = {
     type: PortValueType;
     required?: boolean;
 
+    /** 消费模式；默认 value，stream 表示运行期逐块消费 */
+    mode?: "value" | "stream";
+
     /** 是否允许多个上游同时连入；默认 false */
     multiple?: boolean;
     description?: string;

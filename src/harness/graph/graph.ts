@@ -14,6 +14,8 @@ import {
     isHarnessValueCompatible,
     isPortTypeCompatible,
     isPortValueType,
+    isToolSetSpec,
+    supportsOutputMode,
 } from "./type";
 import type {
     GraphEventDeclaration,
@@ -21,6 +23,7 @@ import type {
     InputPortSpec,
     JsonObject,
     OutputPortSpec,
+    ToolSetSpec,
 } from "./type";
 
 export type GraphOptions = {
@@ -31,6 +34,9 @@ export type GraphOptions = {
     ui?: JsonObject;
     parameters?: readonly GraphParameterDeclaration[];
     events?: readonly GraphEventDeclaration[];
+
+    /** Graph 级默认工具范围；节点级 ToolSet 只能在此基础上收窄 */
+    toolSet?: ToolSetSpec;
 };
 
 /**
@@ -50,6 +56,7 @@ export class Graph{
     readonly ui?: JsonObject;
     readonly parameters: readonly GraphParameterDeclaration[];
     readonly events: readonly GraphEventDeclaration[];
+    readonly toolSet?: ToolSetSpec;
 
     constructor(
         nodes: readonly GraphNode[],
@@ -65,6 +72,7 @@ export class Graph{
         this.ui = options.ui;
         this.parameters = options.parameters ?? [];
         this.events = options.events ?? [];
+        this.toolSet = options.toolSet;
     }
 
     getNode(nodeId: string): GraphNode | undefined{
@@ -179,6 +187,17 @@ export class Graph{
                 });
             }
 
+            if (fromPort !== undefined && toPort?.mode === "stream"
+                && !supportsOutputMode(fromPort, "stream")){
+                issues.push({
+                    code: HarnessErrorCode.PortTypeMismatch,
+                    message: `Output "${fromNode.id}.${fromPort.name}" does not support stream mode`,
+                    nodeId: fromNode.id,
+                    port: fromPort.name,
+                    edgeIndex: index,
+                });
+            }
+
             const incomingKey = portKey(toNode.id, edge.to.port);
             const incoming = (incomingCounts.get(incomingKey) ?? 0) + 1;
             incomingCounts.set(incomingKey, incoming);
@@ -222,6 +241,12 @@ export class Graph{
         }
 
         validateDeclarations(this, issues);
+        if (this.toolSet !== undefined && !isToolSetSpec(this.toolSet)){
+            issues.push({
+                code: HarnessErrorCode.InvalidGraph,
+                message: "Graph toolSet is not a valid ToolSetSpec",
+            });
+        }
         return issues;
     }
 
@@ -288,6 +313,15 @@ function validatePorts(node: GraphNode, issues: HarnessIssue[]): void{
                 port: port.name,
             });
         }
+    }
+
+    const inputModes = new Set(node.inputs.map((port) => port.mode ?? "value"));
+    if (inputModes.size > 1){
+        issues.push({
+            code: HarnessErrorCode.InvalidNode,
+            message: "A node cannot mix stream and value inputs in Step 3",
+            nodeId: node.id,
+        });
     }
 
     const outputNames = new Set<string>();

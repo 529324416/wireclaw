@@ -9,11 +9,13 @@ import type { GraphNode, NodeContext, NodeServices } from "../graph/node";
 import {
     isHarnessValue,
     isHarnessValueCompatible,
+    supportsOutputMode,
 } from "../graph/type";
 import type {
     HarnessValue,
     NodeOutputValues,
 } from "../graph/type";
+import { OutputChannel } from "./channel";
 import type {
     GraphHost,
     GraphRunInput,
@@ -50,6 +52,8 @@ export class GraphRun{
     private readonly _listeners = new Set<GraphEventListener>();
     private readonly _records: NodeRunRecord[] = [];
     private readonly _outputs = new Map<string, NodeOutputValues>();
+    private readonly _channels = new Map<string, OutputChannel<HarnessValue>>();
+    private readonly _streamPorts = new Set<string>();
     private readonly _inputEdges = new Map<string, Map<string, Edge[]>>();
     private readonly _dependents = new Map<string, string[]>();
     private readonly _pending = new Map<string, number>();
@@ -106,6 +110,7 @@ export class GraphRun{
         if (this._status !== "running" || this._cancelRequested) return;
         this._cancelRequested = true;
         this._abort.abort();
+        this._closeAllChannels();
     }
 
     start(): void{
@@ -141,6 +146,7 @@ export class GraphRun{
         }catch(error){
             this._failure = error;
             this._abort.abort();
+            this._closeAllChannels();
         }
 
         this._finish();
@@ -172,13 +178,26 @@ export class GraphRun{
             dependencies.set(node.id, new Set());
             this._dependents.set(node.id, []);
             this._inputEdges.set(node.id, new Map());
+            for (const port of node.outputs){
+                this._channels.set(
+                    channelKey(node.id, port.name),
+                    new OutputChannel<HarnessValue>(),
+                );
+            }
         }
 
         for (const edge of this._graph.edges){
             const from = dependencies.get(edge.from.nodeId);
             const to = dependencies.get(edge.to.nodeId);
             if (from === undefined || to === undefined) continue;
-            to.add(edge.from.nodeId);
+
+            const targetPort = this._graph.getNode(edge.to.nodeId)
+                ?.inputs.find((port) => port.name === edge.to.port);
+            if (targetPort?.mode !== "stream"){
+                to.add(edge.from.nodeId);
+            } else {
+                this._streamPorts.add(channelKey(edge.from.nodeId, edge.from.port));
+            }
 
             const byPort = this._inputEdges.get(edge.to.nodeId);
             if (byPort === undefined) continue;
@@ -199,6 +218,12 @@ export class GraphRun{
 
     private async _execute(): Promise<void>{
         const active = new Set<Promise<void>>();
+        const hasStreamConsumer = this._graph.nodes.some((node) =>
+            node.inputs.some((port) => port.mode === "stream"));
+        // 流消费者需要与上游并发运行；至少给它们留一个槽位
+        const concurrency = hasStreamConsumer
+            ? Math.max(2, this._maxConcurrency)
+            : this._maxConcurrency;
 
         const launch = (nodeId: string): void =>{
             let promise: Promise<void>;
@@ -209,7 +234,7 @@ export class GraphRun{
         };
 
         while (this._failure === undefined && !this._abort.signal.aborted){
-            while (this._ready.length > 0 && active.size < this._maxConcurrency){
+            while (this._ready.length > 0 && active.size < concurrency){
                 const nodeId = this._ready.shift();
                 if (nodeId !== undefined) launch(nodeId);
             }
@@ -219,6 +244,7 @@ export class GraphRun{
         }
 
         // 失败/取消后等待已经启动的节点收尾，保证 records 完整
+        this._closeAllChannels();
         while (active.size > 0){
             await Promise.race(active);
         }
@@ -246,6 +272,14 @@ export class GraphRun{
             const inputs = this._resolveInputs(node);
             const outputs = await node.execute(this._createContext(node), inputs);
 
+            if (this._abort.signal.aborted){
+                throw new HarnessError(
+                    HarnessErrorCode.NodeExecutionFailed,
+                    `Node "${node.id}" completed after the run was aborted`,
+                    { nodeId: node.id },
+                );
+            }
+
             if (!isRecord(outputs)){
                 throw new HarnessError(
                     HarnessErrorCode.NodeExecutionFailed,
@@ -258,6 +292,7 @@ export class GraphRun{
                 this._validateOutputs(node, outputs);
             }
 
+            this._closeNodeChannels(node.id);
             this._outputs.set(node.id, outputs);
             record.outputs = outputs;
             record.endedAt = Date.now();
@@ -271,6 +306,7 @@ export class GraphRun{
             });
             this._notifyDependents(nodeId);
         }catch(error){
+            this._closeNodeChannels(nodeId);
             const cancelled = this._abort.signal.aborted;
             record.status = cancelled ? "cancelled" : "failed";
             record.error = error;
@@ -280,6 +316,7 @@ export class GraphRun{
             if (!cancelled){
                 this._failure ??= error;
                 this._abort.abort();
+                this._closeAllChannels();
                 this._emit({
                     type: "node:error",
                     runId: this.id,
@@ -297,6 +334,16 @@ export class GraphRun{
 
         for (const port of node.inputs){
             const edges = byPort?.get(port.name) ?? [];
+            if (port.mode === "stream"){
+                if (edges.length === 0 && port.required === true){
+                    throw new HarnessError(
+                        HarnessErrorCode.MissingInput,
+                        `Required stream input "${node.id}.${port.name}" has no source`,
+                        { nodeId: node.id, port: port.name },
+                    );
+                }
+                continue;
+            }
             if (edges.length === 0){
                 const fallback = node.inputDefaults[port.name];
                 if (fallback !== undefined){
@@ -397,6 +444,7 @@ export class GraphRun{
             },
             attachments: host.attachments,
             tools: host.tools,
+            defaultToolSet: this._graph.toolSet,
             ...(host.onToolApproval === undefined
                 ? {}
                 : {
@@ -418,16 +466,8 @@ export class GraphRun{
             log: (level, message, data) =>{
                 host.log?.(level, message, data);
             },
-            emit: (port, chunk) =>{
-                this._emit({
-                    type: "node:stream",
-                    runId: this.id,
-                    nodeId: node.id,
-                    port,
-                    chunk,
-                    at: Date.now(),
-                });
-            },
+            stream: (port) => this._streamInput(node, port),
+            emit: (port, chunk) => this._emitNodeChunk(node, port, chunk),
             publish: (event, payload) =>{
                 this._sequence += 1;
                 this._emit({
@@ -441,6 +481,105 @@ export class GraphRun{
                 });
             },
         };
+    }
+
+    private _streamInput(
+        node: GraphNode,
+        portName: string,
+    ): AsyncIterable<HarnessValue>{
+        const port = node.inputs.find((item) => item.name === portName);
+        if (port === undefined || port.mode !== "stream"){
+            throw new HarnessError(
+                HarnessErrorCode.InvalidPort,
+                `Node "${node.id}" has no stream input "${portName}"`,
+                { nodeId: node.id, port: portName },
+            );
+        }
+
+        const edges = this._inputEdges.get(node.id)?.get(portName) ?? [];
+        if (edges.length === 0) return emptyStream();
+        if (edges.length > 1){
+            throw new HarnessError(
+                HarnessErrorCode.NotImplemented,
+                `Multiple stream sources for "${node.id}.${portName}" are not supported yet`,
+                { nodeId: node.id, port: portName },
+            );
+        }
+
+        const edge = edges[0];
+        const channel = this._channels.get(channelKey(edge.from.nodeId, edge.from.port));
+        if (channel === undefined){
+            throw new HarnessError(
+                HarnessErrorCode.MissingValue,
+                `Stream source "${edge.from.nodeId}.${edge.from.port}" is not available`,
+                { nodeId: node.id, port: portName },
+            );
+        }
+        return channel;
+    }
+
+    private _emitNodeChunk(
+        node: GraphNode,
+        portName: string,
+        chunk: HarnessValue,
+    ): void{
+        const port = node.outputs.find((item) => item.name === portName);
+        if (port === undefined){
+            throw new HarnessError(
+                HarnessErrorCode.InvalidValue,
+                `Node "${node.id}" has no output port "${portName}"`,
+                { nodeId: node.id, port: portName },
+            );
+        }
+        if (!supportsOutputMode(port, "stream")){
+            throw new HarnessError(
+                HarnessErrorCode.InvalidValue,
+                `Output "${node.id}.${portName}" does not support stream mode`,
+                { nodeId: node.id, port: portName },
+            );
+        }
+        if (!isHarnessValue(chunk) || !isHarnessValueCompatible(port.type, chunk)){
+            throw new HarnessError(
+                HarnessErrorCode.InvalidValue,
+                `Stream chunk for "${node.id}.${portName}" is not a valid ${port.type} value`,
+                { nodeId: node.id, port: portName },
+            );
+        }
+
+        const key = channelKey(node.id, portName);
+        const channel = this._channels.get(key);
+        if (channel === undefined){
+            throw new HarnessError(
+                HarnessErrorCode.InvalidValue,
+                `Node "${node.id}" has no output channel "${portName}"`,
+                { nodeId: node.id, port: portName },
+            );
+        }
+
+        // 没有 stream 消费者时只发 node:stream 事件，避免无界缓冲
+        if (this._streamPorts.has(key)) channel.emit(chunk);
+        this._emit({
+            type: "node:stream",
+            runId: this.id,
+            nodeId: node.id,
+            port: portName,
+            chunk,
+            at: Date.now(),
+        });
+    }
+
+    private _closeNodeChannels(nodeId: string): void{
+        const node = this._graph.getNode(nodeId);
+        if (node === undefined) return;
+        for (const port of node.outputs){
+            this._channels.get(channelKey(nodeId, port.name))?.close();
+        }
+    }
+
+    private _closeAllChannels(): void{
+        for (const channel of this._channels.values()){
+            channel.close();
+        }
     }
 
     private _finish(): void{
@@ -485,6 +624,15 @@ export class GraphRun{
             }
         }
     }
+}
+
+function channelKey(nodeId: string, port: string): string{
+    return `${nodeId}\u0000${port}`;
+}
+
+async function* emptyStream(): AsyncGenerator<HarnessValue>{
+    // 可选 stream 输入没有上游时立即结束
+    return;
 }
 
 function normalizeConcurrency(value: number | undefined): number{

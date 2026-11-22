@@ -18,7 +18,8 @@ import { isGenerationProvider, isChatProvider } from "../../session/protocol";
 import type { GenerationModality } from "../../session/protocol";
 import { system } from "../../session/message";
 import { RunStatus, Session, SessionHistory } from "../../session/session";
-import { SessionPermission } from "../../session/type";
+import type { Run } from "../../session/session";
+import { SessionEventType, SessionPermission } from "../../session/type";
 import type { SessionRuntimeOptions } from "../../session/type";
 import {
     attachmentRefs,
@@ -61,7 +62,7 @@ export class ModelCallNode extends GraphNode{
             {
                 name: "thinking",
                 type: "text",
-                supportedModes: ["value"],
+                supportedModes: ["value", "stream"],
                 defaultMode: "value",
             },
             {
@@ -125,15 +126,28 @@ export class ModelCallNode extends GraphNode{
             { hostTools: false },
         );
 
-        const run = await session.run(
-            buildUserContent(prompt, refs),
-            {
-                maxSteps: 1,
-                permission: SessionPermission.ReadOnly,
-                enableUserInput: false,
-                toolProgressDelayMs: 0,
-            },
-        );
+        const unsubscribe = session.subscribe((event) =>{
+            if (event.type !== SessionEventType.ASSISTANT_TOKEN) return;
+            ctx.emit(event.isThinking ? "thinking" : "text", {
+                type: "text",
+                text: event.token,
+            });
+        });
+
+        let run: Run;
+        try{
+            run = await session.run(
+                buildUserContent(prompt, refs),
+                {
+                    maxSteps: 1,
+                    permission: SessionPermission.ReadOnly,
+                    enableUserInput: false,
+                    toolProgressDelayMs: 0,
+                },
+            );
+        }finally{
+            unsubscribe();
+        }
 
         if (run.status !== RunStatus.Completed){
             throw new HarnessError(

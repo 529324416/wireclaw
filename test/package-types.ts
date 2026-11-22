@@ -4,6 +4,7 @@ import {
     GraphRun,
     McpToolProvider,
     NodeTypeRegistry,
+    ToolSet,
     createBuiltinNodeRegistry,
     createNewSession,
 } from "wireclaw";
@@ -22,6 +23,7 @@ void Graph;
 void GraphRun;
 void McpToolProvider;
 void NodeTypeRegistry;
+void ToolSet;
 void createBuiltinNodeRegistry;
 void createNewSession;
 void (null as unknown as GraphHost);

@@ -8,7 +8,9 @@ import type {
     NodeInputValues,
     NodeOutputValues,
     OutputPortSpec,
+    ToolSetSpec,
 } from "../graph/type";
+import { ToolSet } from "../runtime/tool-set";
 import { isChatProvider } from "../../session/protocol";
 import { system } from "../../session/message";
 import {
@@ -48,6 +50,7 @@ export class AgentRunNode extends GraphNode{
             { name: "model", type: "model", required: true },
             { name: "input", type: "text", required: true },
             { name: "attachments", type: "attachments" },
+            { name: "toolset", type: "toolset" },
         ];
     }
 
@@ -62,7 +65,7 @@ export class AgentRunNode extends GraphNode{
             {
                 name: "thinking",
                 type: "text",
-                supportedModes: ["value"],
+                supportedModes: ["value", "stream"],
                 defaultMode: "value",
             },
             {
@@ -107,7 +110,31 @@ export class AgentRunNode extends GraphNode{
         const permission = readPermission(config);
         const maxSteps = readOptionalPositiveInteger(config, "maxSteps", this.type) ?? 8;
         const systemPrompt = readOptionalString(config, "system", this.type);
-        const hostOptions = readHostOptions(config);
+
+        const specs: ToolSetSpec[] = [];
+        if (ctx.services.defaultToolSet !== undefined){
+            specs.push(ctx.services.defaultToolSet);
+        }
+        const nodeToolSet = inputs.toolset;
+        if (nodeToolSet !== undefined){
+            if (nodeToolSet.type !== "toolset"){
+                throw new HarnessError(
+                    HarnessErrorCode.InvalidValue,
+                    "AgentRun toolset input must be a toolset value",
+                    { nodeId: this.id },
+                );
+            }
+            specs.push(nodeToolSet.toolset);
+        }
+
+        const toolSource = ctx.services.tools === undefined
+            ? undefined
+            : specs.length === 0
+                ? ctx.services.tools
+                : new ToolSet(ctx.services.tools, specs);
+        const toolSetHost = toolSource instanceof ToolSet ? toolSource.hostTools : undefined;
+        const hostOptions = readHostOptions(config, toolSetHost);
+
         const history = new SessionHistory(
             undefined,
             systemPrompt === undefined ? [] : [system(systemPrompt)],
@@ -123,6 +150,14 @@ export class AgentRunNode extends GraphNode{
 
         let handlerError: unknown;
         const unsubscribe = session.subscribe((event) =>{
+            if (event.type === SessionEventType.ASSISTANT_TOKEN){
+                ctx.emit(event.isThinking ? "thinking" : "text", {
+                    type: "text",
+                    text: event.token,
+                });
+                return;
+            }
+
             if (event.type === SessionEventType.TOOL_APPROVAL_REQUIRED){
                 const handler = ctx.services.onToolApproval;
                 if (handler === undefined){
@@ -173,7 +208,7 @@ export class AgentRunNode extends GraphNode{
             run = await session.run(
                 buildUserContent(input, attachments),
                 {
-                    tools: ctx.services.tools,
+                    tools: toolSource,
                     permission,
                     maxSteps,
                     enableUserInput: hostOptions.hostTools === true
@@ -242,9 +277,18 @@ function readPermission(config: Record<string, unknown>): SessionPermission{
     return value;
 }
 
-function readHostOptions(config: Record<string, unknown>): SessionHostOptions{
+function readHostOptions(
+    config: Record<string, unknown>,
+    fallback?: { askUser?: boolean; viewMedia?: boolean },
+): SessionHostOptions{
     const value = config.hostTools;
-    if (value === undefined) return { hostTools: false };
+    if (value === undefined){
+        if (fallback !== undefined
+            && (fallback.askUser !== undefined || fallback.viewMedia !== undefined)){
+            return { hostTools: fallback };
+        }
+        return { hostTools: false };
+    }
     if (typeof value === "boolean") return { hostTools: value };
     if (typeof value !== "object" || value === null || Array.isArray(value)){
         throw new HarnessError(

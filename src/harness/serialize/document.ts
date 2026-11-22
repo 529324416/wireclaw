@@ -5,6 +5,7 @@ import type {
     JsonObject,
     JsonValue,
     NodeInputValues,
+    ToolSetSpec,
 } from "../graph/type";
 
 /** 节点实例的序列化形态；端口由节点类型/实例在反序列化时重建 */
@@ -27,6 +28,7 @@ export type GraphDocument = {
     edges: EdgeDocument[];
     parameters?: GraphParameterDeclaration[];
     events?: GraphEventDeclaration[];
+    toolSet?: ToolSetSpec;
     metadata?: JsonObject;
 
     /** 设计器坐标等；运行时忽略 */

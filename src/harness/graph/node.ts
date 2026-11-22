@@ -13,6 +13,7 @@ import type {
     NodeInputValues,
     NodeOutputValues,
     OutputPortSpec,
+    ToolSetSpec,
 } from "./type";
 
 export type MaybePromise<T> = T | Promise<T>;
@@ -31,6 +32,9 @@ export interface NodeServices{
 
     /** B 节点可访问的工具注册表 */
     readonly tools?: ToolRegistry;
+
+    /** Graph 级默认 ToolSet；节点级 ToolSet 只能在此基础上收窄 */
+    readonly defaultToolSet?: ToolSetSpec;
 
     /** B 节点审批回调；未提供时遇到审批会失败 */
     readonly onToolApproval?: (
@@ -68,6 +72,9 @@ export interface NodeContext{
 
     /** 运行时日志；设计器/宿主可以订阅 */
     log(level: "debug" | "info" | "warn" | "error", message: string, data?: unknown): void;
+
+    /** 订阅一个 stream 输入端口；无上游或可选输入时返回空序列 */
+    stream(port: string): AsyncIterable<HarnessValue>;
 
     /** 向 stream 输出端口写入增量；value 模式下由运行时决定是否忽略 */
     emit(port: string, chunk: HarnessValue): void;

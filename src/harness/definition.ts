@@ -11,6 +11,8 @@ export const HarnessBuiltinNodeType = {
     Model: "core.model",
     ModelCall: "core.model.call",
     AgentRun: "core.agent.run",
+    ToolSet: "core.toolset",
+    Choice: "core.choice",
     EventTrigger: "core.eventTrigger",
     LogSink: "core.log",
 } as const;

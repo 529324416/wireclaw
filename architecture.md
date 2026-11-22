@@ -857,9 +857,9 @@ await registry.closeAll();
 - stdio 传输由 `src/client` 提供，已通过实机联调（Python 子进程）。
 - 更多待办见根目录 `todo.md`。
 
-## Harness Graph（Step 1 对象模型 + Step 2 运行时核心）
+## Harness Graph（Step 1–3：对象模型、运行时、ToolSet 与流式）
 
-当前状态：Graph 对象模型、校验、JSON 序列化、value-first 运行时，以及内建 input / output / constant / model / model.call / agent.run 节点已实现；流式消费、EventTrigger、外部暂停/恢复尚未实现。
+当前状态：Graph 对象模型、校验、JSON 序列化、运行时、ToolSet、流式端口、EventTrigger，以及内建 input / output / constant / model / model.call / agent.run / toolset / choice / eventTrigger / log 节点已实现；调度级 BranchNode、外部暂停/恢复、节点库预设尚未实现。
 
 ```text
 src/harness/
@@ -876,18 +876,20 @@ src/harness/
   runtime/
     types.ts          GraphHost / GraphRunOptions / GraphRunResult / NodeRunRecord
     runner.ts         GraphRun、调度器、取消、生命周期事件
+    channel.ts        OutputChannel（无界缓冲 + async iterator）
+    tool-set.ts       ToolSet（ToolSource 过滤/收窄/host 工具策略）
   serialize/
     document.ts       GraphDocument / NodeDocument
     serializer.ts     serializeGraph / deserializeGraph
     plugin.ts         序列化插件接口（占位，供版本迁移/私有字段使用）
-  node/               内建节点：input / output / constant / model / model.call / agent.run
+  node/               内建节点：input / output / constant / model / model.call / agent.run / toolset / choice / eventTrigger / log
 ```
 
 核心设计：
 
 - **TS 优先**：Node、Edge、Graph 是运行时对象；JSON 只用于持久化、导出和编辑器交换。
 - **端口与值**：端口声明 `PortValueType`（text/json/model/toolset/attachment/attachments/any）；值统一为 `HarnessValue`；媒体只保存 `AttachmentRef.contentHash`。
-- **Value / Stream 预留**：输出端口用 `supportedModes` / `defaultMode` 声明；Step 2 运行时仍是 value-first，节点 `execute` 的 stream 输出通过 `ctx.emit` 转发事件、value 输出通过返回值。后续切换默认流式不需要改 Graph/Edge 结构。
+- **Value / Stream**：输出端口用 `supportedModes` / `defaultMode` 声明，输入端口用 `mode: "stream"` 声明；节点 `execute` 的 stream 输出通过 `ctx.emit` 推送、value 输出通过返回值。当前 A/B 仍返回最终值，同时推送 token 流；后续可把默认展示切换为纯流式而不改 Graph/Edge 结构。
 - **自定义节点**：宿主用 `NodeTypeRegistry.register({ type, version, create, configSchema? })` 注册；JSON 只保存 `type + typeVersion + config + inputs + ui`，不携带可执行代码；未知类型或版本不匹配会拒绝反序列化。
 - **校验**：节点 ID/端口唯一、边两端节点与端口存在、端口类型兼容、必填输入（边或默认值）、单输入端口只能一条边（`multiple: true` 例外）、重复边、环、图级参数/事件声明。
 - **GraphDocument**：`version: 1`；显式 `nodes` 与 `edges`；节点 config/inputs/ui 必须是 JSON-safe；`ui` 仅服务设计器，运行时忽略。
@@ -896,12 +898,15 @@ src/harness/
 - **运行入口**：`graph.run({ host, input, listener, signal, maxConcurrency })` 返回 `GraphRun`；`run.done` 解析 `GraphRunResult`，并支持 `cancel()` / `onEvent()`。
 - **调度器**：value-first DAG；依赖满足的节点并行执行（默认并发 4）；节点失败 fail-fast 并中止活跃节点；取消通过 AbortSignal 传播；每个节点写入 `NodeRunRecord`。
 - **GraphHost**：宿主注入 `resolveProvider`、`tools`、`attachments`、`onToolApproval`、`onUserInput`、`log`；Graph JSON 只保存 providerId / modelId，不保存 Provider 实例或密钥。
-- **内建节点**：`core.input` / `core.output` / `core.constant` / `core.model` / `core.model.call`（A，chat/generate）/ `core.agent.run`（B）。
-- **A 节点**：复用一次性 Session 调用现有附件解析与模型门禁（`maxSteps: 1`、host 工具关闭）；generate 模式走 `GenerationCapability` 并落盘附件。
-- **B 节点**：复用 Session/AgentLoop，注入宿主 `ToolRegistry`、权限、`maxSteps`；审批与 `host__ask_user` 通过 `GraphHost` 回调桥接；默认不注册 host 内置工具。
-- **事件**：run/node 生命周期事件自动发出；`ctx.emit` 目前只转发 `node:stream`（尚无流消费者），`ctx.publish` 已能发出 `custom` 事件。
+- **内建节点**：`core.input` / `core.output` / `core.constant` / `core.model` / `core.model.call`（A，chat/generate）/ `core.agent.run`（B）/ `core.toolset` / `core.choice` / `core.eventTrigger` / `core.log`。
+- **A 节点**：复用一次性 Session 调用现有附件解析与模型门禁（`maxSteps: 1`、host 工具关闭）；chat 模式把 `ASSISTANT_TOKEN` 转发为 `text` / `thinking` 流；generate 模式走 `GenerationCapability` 并落盘附件。
+- **B 节点**：复用 Session/AgentLoop，注入权限、`maxSteps` 与 `ToolSet`；审批与 `host__ask_user` 通过 `GraphHost` 回调桥接；默认不注册 host 内置工具。
+- **ToolSet**：`Graph.toolSet` 是默认上限，`core.toolset` 节点产生节点级 spec，B 节点的 `toolset` 输入在 Graph 级之上进一步收窄；`ToolSet` 实现 `ToolSource`，不修改 Session。host 工具策略按 AND 合并。
+- **流式**：输入端口可声明 `mode: "stream"`；A/B 的 `text` / `thinking` 输出支持 value + stream；运行时用 `OutputChannel` 缓冲并按端口推送。`core.eventTrigger` 把流逐块发布为 `custom` 事件，`core.log` 写入宿主日志。流消费者与上游并发执行，图完成时等待流关闭。
+- **ChoiceNode**：`core.choice` 是值选择，`whenTrue` / `whenFalse` 两条上游都会执行；调度级 `BranchNode` 尚未实现。
+- **事件**：run/node 生命周期事件自动发出；`ctx.emit` 推流，`ctx.publish` 发 `custom` 事件；外部通过 `Graph.run({ listener })` 消费。
 
-尚未实现：流式端口消费、EventTrigger 节点、图级暂停/恢复/checkpoint、`multiple` 输入 fan-in（Step 2 运行时明确报 `NotImplemented`）、Harness ToolSet（B 节点当前使用宿主全局 ToolRegistry）、Branch/Condition 节点、节点库/预设封装。
+尚未实现：调度级 BranchNode、图级暂停/恢复/checkpoint、`multiple` 输入 fan-in（运行时明确报 `NotImplemented`）、流背压/限流、节点库/预设封装、工具依赖静态校验。
 
 ## ComfyUI Qwen-Image Tool
 

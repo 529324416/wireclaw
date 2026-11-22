@@ -14,7 +14,7 @@ import type {
     JsonValue,
     NodeInputValues,
 } from "../graph/type";
-import { isHarnessValue, isPortValueType } from "../graph/type";
+import { isHarnessValue, isPortValueType, isToolSetSpec } from "../graph/type";
 import type { GraphDocument, NodeDocument } from "./document";
 
 export type GraphDeserializeOptions = {
@@ -84,6 +84,15 @@ export function serializeGraph(graph: Graph): GraphDocument{
     if (graph.events.length > 0){
         document.events = cloneJson(graph.events) as GraphEventDeclaration[];
     }
+    if (graph.toolSet !== undefined){
+        if (!isToolSetSpec(graph.toolSet)){
+            throw new HarnessError(
+                HarnessErrorCode.SerializationFailed,
+                "Graph toolSet is not a valid ToolSetSpec",
+            );
+        }
+        document.toolSet = cloneJson(graph.toolSet);
+    }
     if (graph.metadata !== undefined){
         if (!isJsonSafe(graph.metadata)){
             throw new HarnessError(
@@ -121,6 +130,7 @@ export function deserializeGraph(
         description: document.description,
         parameters: document.parameters,
         events: document.events,
+        toolSet: document.toolSet,
         metadata: document.metadata,
         ui: document.ui,
     });
@@ -169,6 +179,12 @@ function parseGraphDocument(value: unknown): GraphDocument{
     if (value.events !== undefined){
         document.events = readArray(value.events, "events")
             .map(parseEventDeclaration);
+    }
+    if (value.toolSet !== undefined){
+        if (!isToolSetSpec(value.toolSet)){
+            throw invalidDocument("toolSet is not a valid ToolSetSpec");
+        }
+        document.toolSet = cloneJson(value.toolSet);
     }
     if (value.metadata !== undefined){
         document.metadata = readJsonObject(value.metadata, "metadata");

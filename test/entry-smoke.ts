@@ -19,6 +19,9 @@ assert.equal("Graph" in node, true, "node entry must expose the harness graph mo
 assert.equal("NodeTypeRegistry" in root, true);
 assert.equal("GraphRun" in root, true);
 assert.equal("createBuiltinNodeRegistry" in root, true);
+assert.equal("ToolSet" in root, true);
+assert.equal("EventTriggerNode" in root, true);
+assert.equal("ChoiceNode" in root, true);
 assert.equal("LocalToolProvider" in root, false, "core must not expose local tools");
 assert.equal("McpStdioTransport" in root, false, "core must not expose stdio transport");
 

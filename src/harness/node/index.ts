@@ -1,11 +1,15 @@
 import { HarnessBuiltinNodeType } from "../definition";
 import { NodeTypeRegistry } from "../graph/registry";
 import { AgentRunNode } from "./agent-run";
+import { ChoiceNode } from "./choice";
 import { ConstantNode } from "./constant";
+import { EventTriggerNode } from "./event-trigger";
 import { InputNode } from "./input";
+import { LogSinkNode } from "./log-sink";
 import { ModelNode } from "./model";
 import { ModelCallNode } from "./model-call";
 import { OutputNode } from "./output";
+import { ToolSetNode } from "./tool-set";
 
 export * from "./input";
 export * from "./output";
@@ -13,6 +17,10 @@ export * from "./constant";
 export * from "./model";
 export * from "./model-call";
 export * from "./agent-run";
+export * from "./tool-set";
+export * from "./choice";
+export * from "./event-trigger";
+export * from "./log-sink";
 export * from "./helpers";
 
 /** 注册 Step 2 的内建节点 */
@@ -64,6 +72,38 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         description: "B 类 Session/AgentLoop 调用",
         builtIn: true,
         create: (id, config, inputs, ui) => new AgentRunNode(id, config, inputs, ui),
+    });
+    registry.register({
+        type: HarnessBuiltinNodeType.ToolSet,
+        version: 1,
+        title: "ToolSet",
+        description: "声明当前节点可访问的工具范围",
+        builtIn: true,
+        create: (id, config, inputs, ui) => new ToolSetNode(id, config, inputs, ui),
+    });
+    registry.register({
+        type: HarnessBuiltinNodeType.Choice,
+        version: 1,
+        title: "Choice",
+        description: "按 boolean 条件选择 whenTrue / whenFalse 的值",
+        builtIn: true,
+        create: (id, config, inputs, ui) => new ChoiceNode(id, config, inputs, ui),
+    });
+    registry.register({
+        type: HarnessBuiltinNodeType.EventTrigger,
+        version: 1,
+        title: "Event Trigger",
+        description: "把 stream 输入发布为 Graph custom 事件",
+        builtIn: true,
+        create: (id, config, inputs, ui) => new EventTriggerNode(id, config, inputs, ui),
+    });
+    registry.register({
+        type: HarnessBuiltinNodeType.LogSink,
+        version: 1,
+        title: "Log Sink",
+        description: "把 text stream 写入宿主日志",
+        builtIn: true,
+        create: (id, config, inputs, ui) => new LogSinkNode(id, config, inputs, ui),
     });
 }
 
