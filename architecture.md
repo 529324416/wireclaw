@@ -857,9 +857,9 @@ await registry.closeAll();
 - stdio 传输由 `src/client` 提供，已通过实机联调（Python 子进程）。
 - 更多待办见根目录 `todo.md`。
 
-## Harness Graph（Step 1–3 + A1–A3 + B1–B3 + C1：对象模型、运行时与预设）
+## Harness Graph（Step 1–3 + A1–A3 + B1–B3 + C1/C2：对象模型、运行时与预设）
 
-当前状态：Graph 对象模型、校验、JSON 序列化、运行时、ToolSet、流式端口、EventTrigger、节点预设、依赖校验、预设导入导出/迁移、GraphEditor 节点目录、调度级分支、隐式 exclusive join、fan-in、SubgraphNode，以及内建 input / output / constant / model / model.call / agent.run / toolset / choice / branch / merge / subgraph / eventTrigger / log 节点已实现；外部暂停/恢复尚未实现。
+当前状态：Graph 对象模型、校验、JSON 序列化、运行时、ToolSet、流式端口、EventTrigger、节点预设、依赖校验、预设导入导出/迁移、GraphEditor 节点目录、调度级分支、隐式 exclusive join、fan-in、SubgraphNode、ForEach / Loop，以及内建 input / output / constant / value / model / model.call / agent.run / toolset / choice / branch / merge / subgraph / foreach / loop / eventTrigger / log 节点已实现；外部暂停/恢复尚未实现。
 
 ```text
 src/harness/
@@ -890,7 +890,7 @@ src/harness/
     serialize.ts      预设/节点库导入导出与版本迁移
   editor/
     catalog.ts        GraphEditor 节点目录契约
-  node/               内建节点：input / output / constant / model / model.call / agent.run / toolset / choice / branch / merge / subgraph / eventTrigger / log
+  node/               内建节点：input / output / constant / value / model / model.call / agent.run / toolset / choice / branch / merge / subgraph / foreach / loop / eventTrigger / log
 ```
 
 核心设计：
@@ -917,6 +917,9 @@ src/harness/
 - **Join 策略**：输入端口支持 `join: "exclusive" | "all" | "error"`。`all` 需要 `multiple: true`（value 聚合为 JSON 数组，stream 汇合所有通道）；`error` 在设计期拒绝多边；默认单值输入为 `exclusive`，并以运行时歧义错误兜底。当前只实现了 `exclusive` / `all` 的运行语义。
 - **B3 序列化与校验**：Branch / Merge 作为普通节点类型随 Graph JSON 往返；单输入多来源在默认 exclusive 下是合法图；`join` / `multiple` 的矛盾组合在 `Graph.validate()` 阶段报错；并发来源在运行时以 `AmbiguousJoin` 失败，不静默丢值。
 - **SubgraphNode（C1）**：`core.subgraph` 的 config 内嵌一个 `GraphDocument`；外层 `input` / `attachments` 映射到内层 `core.input`，内层 `core.output` 的 `text` / `attachments` / `json` 映射回外层。内层与外层共用同一个 `NodeTypeRegistry`、Provider/Tool/Attachment 服务和运行参数；内层 `custom` 事件以 `subgraph.<nodeId>.<event>` 转发，`node:skipped` 以 `subgraph.<nodeId>.node:skipped` 转发。内层图非法时外层节点以 `InvalidNode` 失败。
+- **core.value**：从 `GraphRunInput.values` 读取命名值，供子图、ForEach、Loop 和宿主参数复用；`required` 默认 true。
+- **ForEachNode（C2）**：输入 `items` JSON 数组，逐项运行内嵌子图；内层通过 `core.value` 读取 `item` / `iteration`。按顺序收集 `resultPort`（默认 text）到 `results` JSON 数组，并输出 `count`；每轮发出 `forEach.<nodeId>.iteration` 事件；当前串行执行，支持外层取消。
+- **LoopNode（C2）**：输入 `initial`，按 `config.maxIterations` 有界运行内嵌子图；内层通过 `core.value` 读取 `state` / `iteration`，`core.output.json` 约定为 `{ state, done? }`，`done === true` 提前结束。输出最终 `value` 和 `iterations`；每轮发出 `loop.<nodeId>.iteration` 事件；当前状态只支持 JSON，串行执行。
 - **Fan-in**：`multiple` value 输入必须声明为 `json` / `any`，运行时把所有非 skipped 上游聚合为 JSON 数组；`multiple` stream 输入按 `join: "all"` 汇合多个通道。
 - **Skipped 传播**：调度器按 value 边逐一记录 `value` / `skipped`；required 输入来自 skipped 分支或全部 connected 输入都 skipped 时，节点 skipped；`node:skipped` 事件与记录状态可被 UI 展示。
 - **事件**：run/node 生命周期事件自动发出；`ctx.emit` 推流，`ctx.publish` 发 `custom` 事件；外部通过 `Graph.run({ listener })` 消费。
@@ -980,7 +983,7 @@ npm run example:branch
 - 两个并发来源直接进入同一输入时，以 `AmbiguousJoin` 失败；
 - 显式 MergeNode 仍作为对照路径可用。
 
-尚未实现：基于 `exclusiveGroup` 的静态互斥证明（当前主要靠运行时 exclusive 检查）、图级暂停/恢复/checkpoint、stream join 的 `zip` / `combineLatest` 策略、流背压/限流、节点级 ToolSet 与依赖的启动前联合校验、Subgraph 递归深度保护、GraphEditor UI 本身。
+尚未实现：基于 `exclusiveGroup` 的静态互斥证明（当前主要靠运行时 exclusive 检查）、图级暂停/恢复/checkpoint、stream join 的 `zip` / `combineLatest` 策略、流背压/限流、节点级 ToolSet 与依赖的启动前联合校验、Subgraph/ForEach/Loop 递归深度保护、ForEach 并发执行、非 JSON Loop 状态、GraphEditor UI 本身。
 
 ## ComfyUI Qwen-Image Tool
 

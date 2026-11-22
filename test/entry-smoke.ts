@@ -29,6 +29,9 @@ assert.equal("createEditorCatalog" in root, true);
 assert.equal("BranchNode" in root, true);
 assert.equal("MergeNode" in root, true);
 assert.equal("SubgraphNode" in root, true);
+assert.equal("ForEachNode" in root, true);
+assert.equal("LoopNode" in root, true);
+assert.equal("ValueNode" in root, true);
 assert.equal("LocalToolProvider" in root, false, "core must not expose local tools");
 assert.equal("McpStdioTransport" in root, false, "core must not expose stdio transport");
 

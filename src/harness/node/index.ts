@@ -5,14 +5,17 @@ import { BranchNode } from "./branch";
 import { ChoiceNode } from "./choice";
 import { ConstantNode } from "./constant";
 import { EventTriggerNode } from "./event-trigger";
+import { ForEachNode } from "./foreach";
 import { InputNode } from "./input";
 import { LogSinkNode } from "./log-sink";
+import { LoopNode } from "./loop";
 import { MergeNode } from "./merge";
 import { ModelNode } from "./model";
 import { ModelCallNode } from "./model-call";
 import { OutputNode } from "./output";
 import { SubgraphNode } from "./subgraph";
 import { ToolSetNode } from "./tool-set";
+import { ValueNode } from "./value";
 
 export * from "./input";
 export * from "./output";
@@ -25,6 +28,9 @@ export * from "./choice";
 export * from "./branch";
 export * from "./merge";
 export * from "./subgraph";
+export * from "./value";
+export * from "./foreach";
+export * from "./loop";
 export * from "./event-trigger";
 export * from "./log-sink";
 export * from "./helpers";
@@ -118,6 +124,30 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         description: "把一张内嵌 Graph 作为节点执行",
         builtIn: true,
         create: (id, config, inputs, ui) => new SubgraphNode(registry, id, config, inputs, ui),
+    });
+    registry.register({
+        type: HarnessBuiltinNodeType.Value,
+        version: 1,
+        title: "Value",
+        description: "从 GraphRunInput.values 读取命名值",
+        builtIn: true,
+        create: (id, config, inputs, ui) => new ValueNode(id, config, inputs, ui),
+    });
+    registry.register({
+        type: HarnessBuiltinNodeType.ForEach,
+        version: 1,
+        title: "ForEach",
+        description: "对 JSON 数组逐项运行内嵌子图",
+        builtIn: true,
+        create: (id, config, inputs, ui) => new ForEachNode(registry, id, config, inputs, ui),
+    });
+    registry.register({
+        type: HarnessBuiltinNodeType.Loop,
+        version: 1,
+        title: "Loop",
+        description: "按 maxIterations 有界运行内嵌子图",
+        builtIn: true,
+        create: (id, config, inputs, ui) => new LoopNode(registry, id, config, inputs, ui),
     });
     registry.register({
         type: HarnessBuiltinNodeType.EventTrigger,

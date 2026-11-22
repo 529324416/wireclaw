@@ -1,11 +1,9 @@
 import { HarnessError, HarnessErrorCode } from "../base/error";
 import { isRecord } from "../base/utils";
 import { HarnessBuiltinNodeType } from "../definition";
-import { Graph } from "../graph/graph";
 import { GraphNode } from "../graph/node";
 import type { NodeContext } from "../graph/node";
 import type { NodeTypeRegistry } from "../graph/registry";
-import type { GraphEventListener } from "../graph/event";
 import type {
     HarnessValue,
     InputPortSpec,
@@ -15,8 +13,9 @@ import type {
     NodeOutputValues,
     OutputPortSpec,
 } from "../graph/type";
-import type { GraphHost } from "../runtime/types";
+import type { GraphRunResult } from "../runtime/types";
 import { attachmentRefs, errorText, readConfig } from "./helpers";
+import { runSubgraph } from "./subgraph-runner";
 
 /**
  * SubgraphNode：用一张内嵌 Graph 作为节点。
@@ -85,10 +84,18 @@ export class SubgraphNode extends GraphNode{
             );
         }
 
-        let inner: Graph;
+        const text = inputs.input?.type === "text" ? inputs.input.text : "";
+        let result: GraphRunResult;
         try{
-            inner = Graph.fromJSON(graphDocument, {
+            result = await runSubgraph({
                 registry: this._registry,
+                ctx,
+                document: graphDocument,
+                input: {
+                    text,
+                    attachments: attachmentRefs(inputs.attachments),
+                },
+                prefix: `subgraph.${this.id}`,
             });
         }catch(error){
             throw new HarnessError(
@@ -97,56 +104,6 @@ export class SubgraphNode extends GraphNode{
                 { nodeId: this.id, origin: error },
             );
         }
-
-        const listener: GraphEventListener = (event) =>{
-            if (event.type === "custom"){
-                ctx.publish(
-                    `subgraph.${this.id}.${event.name}`,
-                    event.payload,
-                );
-                return;
-            }
-            if (event.type === "node:skipped"){
-                ctx.publish(
-                    `subgraph.${this.id}.node:skipped`,
-                    { nodeId: event.nodeId },
-                );
-            }
-        };
-
-        const host: GraphHost = {
-            resolveProvider: (providerId) => ctx.services.resolveProvider(providerId),
-            ...(ctx.services.tools === undefined ? {} : { tools: ctx.services.tools }),
-            ...(ctx.services.attachments === undefined
-                ? {}
-                : { attachments: ctx.services.attachments }),
-            ...(ctx.services.parameters === undefined
-                ? {}
-                : { parameters: ctx.services.parameters }),
-            ...(ctx.services.onToolApproval === undefined
-                ? {}
-                : {
-                    onToolApproval: (request) => ctx.services.onToolApproval!(request),
-                }),
-            ...(ctx.services.onUserInput === undefined
-                ? {}
-                : {
-                    onUserInput: (request) => ctx.services.onUserInput!(request),
-                }),
-            log: (level, message, data) =>{
-                ctx.log(level, message, data);
-            },
-        };
-
-        const text = inputs.input?.type === "text" ? inputs.input.text : "";
-        const result = await inner.run({
-            host,
-            input: {
-                text,
-                attachments: attachmentRefs(inputs.attachments),
-            },
-            listener,
-        }).done;
 
         if (result.status !== "completed"){
             throw new HarnessError(
