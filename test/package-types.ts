@@ -1,11 +1,13 @@
 import {
     AttachmentFileManager,
     Graph,
+    GraphRun,
     McpToolProvider,
     NodeTypeRegistry,
+    createBuiltinNodeRegistry,
     createNewSession,
 } from "wireclaw";
-import type { GraphDocument } from "wireclaw";
+import type { GraphDocument, GraphHost, GraphRunResult } from "wireclaw";
 import { LocalFileHost, readLocalSourcePath } from "wireclaw/node";
 import {
     LocalToolProvider,
@@ -17,9 +19,13 @@ import { IndexedDbFileHost, MemoryFileHost, OpfsFileHost } from "wireclaw/browse
 
 void AttachmentFileManager;
 void Graph;
+void GraphRun;
 void McpToolProvider;
 void NodeTypeRegistry;
+void createBuiltinNodeRegistry;
 void createNewSession;
+void (null as unknown as GraphHost);
+void (null as unknown as GraphRunResult);
 void LocalFileHost;
 void readLocalSourcePath;
 void LocalToolProvider;

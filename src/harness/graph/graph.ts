@@ -1,6 +1,9 @@
 import { uniqueId } from "../../base";
 import type { HarnessIssue } from "../base/error";
 import { HarnessError, HarnessErrorCode, formatHarnessIssue } from "../base/error";
+import type { GraphRun } from "../runtime/runner";
+import { runGraph } from "../runtime/runner";
+import type { GraphRunOptions } from "../runtime/types";
 import type { GraphDocument } from "../serialize/document";
 import type { GraphDeserializeOptions } from "../serialize/serializer";
 import { deserializeGraph, serializeGraph } from "../serialize/serializer";
@@ -237,6 +240,11 @@ export class Graph{
                 issues,
             },
         );
+    }
+
+    /** 启动一次运行；返回的 GraphRun 立即开始调度 */
+    run(options: GraphRunOptions): GraphRun{
+        return runGraph(this, options);
     }
 
     /** 序列化为纯 JSON 文档；不要求图已经通过 validate()，便于编辑器保存草稿 */

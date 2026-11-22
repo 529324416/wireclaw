@@ -1,18 +1,53 @@
+import type { AttachmentFileManager } from "../../session/attachment-manager";
+import type { AIProvider } from "../../session/protocol";
+import type { ToolRegistry } from "../../session/tool";
+import type { ToolApprovalDecision, ToolApprovalRequest } from "../../session/session";
+import type { UserInputRequest, UserInputResult } from "../../session/type";
 import type {
+    HarnessInput,
     HarnessValue,
     InputPortSpec,
     JsonObject,
     JsonValue,
+    ModelBinding,
     NodeInputValues,
     NodeOutputValues,
     OutputPortSpec,
 } from "./type";
 
+export type MaybePromise<T> = T | Promise<T>;
+
+/** 运行时注入给节点的宿主服务；节点不直接持有 Provider 实例的构造信息 */
+export interface NodeServices{
+
+    /** 按 providerId 查找宿主已构造的 Provider */
+    resolveProvider(providerId: string): AIProvider | undefined;
+
+    /** 解析模型绑定；Provider 不存在时抛出 HarnessError */
+    resolveModel(binding: ModelBinding): AIProvider;
+
+    /** 附件仓库；A/B 节点用于解析 media */
+    readonly attachments?: AttachmentFileManager;
+
+    /** B 节点可访问的工具注册表 */
+    readonly tools?: ToolRegistry;
+
+    /** B 节点审批回调；未提供时遇到审批会失败 */
+    readonly onToolApproval?: (
+        request: ToolApprovalRequest,
+    ) => MaybePromise<ToolApprovalDecision>;
+
+    /** B 节点人工输入回调；未提供时遇到 host__ask_user 会失败 */
+    readonly onUserInput?: (
+        request: UserInputRequest,
+    ) => MaybePromise<UserInputResult>;
+}
+
 /**
  * 节点执行上下文。
  *
- * @note Step 1 只定义契约，不提供运行时实现；Step 2 会在这里补充
- *       provider / generation / attachment 等服务。
+ * @note Step 2 提供 provider / attachment / tool / 审批桥接；
+ *       stream 输出通过 emit 预留给后续流式运行时。
  */
 export interface NodeContext{
 
@@ -24,6 +59,12 @@ export interface NodeContext{
 
     /** 节点实例的静态配置 */
     readonly config: JsonValue | undefined;
+
+    /** 本次 GraphRun 的输入 */
+    readonly input: HarnessInput;
+
+    /** 宿主注入的服务 */
+    readonly services: NodeServices;
 
     /** 运行时日志；设计器/宿主可以订阅 */
     log(level: "debug" | "info" | "warn" | "error", message: string, data?: unknown): void;

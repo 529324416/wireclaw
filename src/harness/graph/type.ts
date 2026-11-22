@@ -76,6 +76,13 @@ export type HarnessValue =
 export type NodeInputValues = Readonly<Record<string, HarnessValue>>;
 export type NodeOutputValues = Readonly<Record<string, HarnessValue>>;
 
+/** 一次 GraphRun 的输入；Step 2 只有 text / attachments，values 预留给命名输入 */
+export type HarnessInput = {
+    text?: string;
+    attachments?: readonly AttachmentRef[];
+    values?: Readonly<Record<string, HarnessValue>>;
+};
+
 /* ---------------------------------------------------------------------------
  * 图级声明
  * ------------------------------------------------------------------------- */

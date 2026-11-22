@@ -7,6 +7,7 @@ export const HARNESS_GRAPH_VERSION = 1 as const;
 export const HarnessBuiltinNodeType = {
     Input: "core.input",
     Output: "core.output",
+    Constant: "core.constant",
     Model: "core.model",
     ModelCall: "core.model.call",
     AgentRun: "core.agent.run",

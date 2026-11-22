@@ -4,7 +4,7 @@ import type {
     NodeOutputValues,
 } from "./type";
 
-export type GraphRunStatus = "completed" | "failed" | "cancelled" | "paused";
+export type GraphRunStatus = "running" | "completed" | "failed" | "cancelled" | "paused";
 
 /**
  * Graph 运行事件。
