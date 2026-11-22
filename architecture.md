@@ -949,6 +949,18 @@ npm run example:harness
 
 `test/harness-minimal.ts` 用同一张图做离线回归。该案例是后续 Landing 的 canary，不依赖 Provider / 外部服务。
 
+Landing A 预设依赖案例：
+
+```bash
+npm run example:preset
+```
+
+- `examples/harness/preset-dependency.ts` 使用 `NodePresetDocument` 实例化一个带 `tools__echo` 依赖的 B 节点；
+- 有工具时，fake Provider 发起工具调用，最终输出 `tool result: echo:hello`；
+- 移除工具后，`GraphRun` 在启动前以 `MissingToolDependency` 失败；
+- 恢复工具后再次运行成功；
+- 图 JSON 中保留 `agent` 节点的 `requires` 声明。
+
 尚未实现：调度级 BranchNode、图级暂停/恢复/checkpoint、`multiple` 输入 fan-in（运行时明确报 `NotImplemented`）、流背压/限流、节点级 ToolSet 与依赖的启动前联合校验、GraphEditor UI 本身。
 
 ## ComfyUI Qwen-Image Tool

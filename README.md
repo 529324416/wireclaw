@@ -195,6 +195,7 @@ npm run typecheck        # source, browser-safe surface, tools and tests
 npm test                 # offline suite; excludes live/local-service scripts
 npm run test:live        # live scripts; needs local services or API keys
 npm run example:harness  # minimal runnable Harness graph (no provider needed)
+npm run example:preset   # preset -> tool dependency -> remove -> restore
 npm run build
 ```
 
