@@ -11,6 +11,7 @@ import { MergeNode } from "./merge";
 import { ModelNode } from "./model";
 import { ModelCallNode } from "./model-call";
 import { OutputNode } from "./output";
+import { SubgraphNode } from "./subgraph";
 import { ToolSetNode } from "./tool-set";
 
 export * from "./input";
@@ -23,6 +24,7 @@ export * from "./tool-set";
 export * from "./choice";
 export * from "./branch";
 export * from "./merge";
+export * from "./subgraph";
 export * from "./event-trigger";
 export * from "./log-sink";
 export * from "./helpers";
@@ -108,6 +110,14 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         description: "汇合 BranchNode 的可选分支输出",
         builtIn: true,
         create: (id, config, inputs, ui) => new MergeNode(id, config, inputs, ui),
+    });
+    registry.register({
+        type: HarnessBuiltinNodeType.Subgraph,
+        version: 1,
+        title: "Subgraph",
+        description: "把一张内嵌 Graph 作为节点执行",
+        builtIn: true,
+        create: (id, config, inputs, ui) => new SubgraphNode(registry, id, config, inputs, ui),
     });
     registry.register({
         type: HarnessBuiltinNodeType.EventTrigger,

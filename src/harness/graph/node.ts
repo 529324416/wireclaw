@@ -37,6 +37,9 @@ export interface NodeServices{
     /** Graph 级默认 ToolSet；节点级 ToolSet 只能在此基础上收窄 */
     readonly defaultToolSet?: ToolSetSpec;
 
+    /** 宿主运行参数；子图会原样传递 */
+    readonly parameters?: Readonly<Record<string, unknown>>;
+
     /** B 节点审批回调；未提供时遇到审批会失败 */
     readonly onToolApproval?: (
         request: ToolApprovalRequest,

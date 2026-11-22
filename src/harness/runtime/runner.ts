@@ -599,6 +599,7 @@ export class GraphRun{
             attachments: host.attachments,
             tools: host.tools,
             defaultToolSet: this._graph.toolSet,
+            parameters: host.parameters,
             ...(host.onToolApproval === undefined
                 ? {}
                 : {

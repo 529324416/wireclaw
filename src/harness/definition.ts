@@ -15,6 +15,7 @@ export const HarnessBuiltinNodeType = {
     Choice: "core.choice",
     Branch: "core.branch",
     Merge: "core.merge",
+    Subgraph: "core.subgraph",
     EventTrigger: "core.eventTrigger",
     LogSink: "core.log",
 } as const;
