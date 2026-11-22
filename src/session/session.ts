@@ -407,6 +407,23 @@ export type RunOptions = {
     enableUserInput?: boolean;
 };
 
+/** Session 级 host 内置工具注册选项
+ * @note 只控制 Session 自带的 host 工具，不涉及 ToolRegistry / ToolProvider；
+ *       默认保持旧行为（注册 ask_user 与 view_media）。
+ */
+export type SessionHostOptions = {
+
+    /** 总开关：false 关闭全部 host 内置工具；对象用于单独配置 */
+    hostTools?: boolean | {
+
+        /** 是否注册 host__ask_user，默认 true */
+        askUser?: boolean;
+
+        /** 是否允许 host__view_media，默认 true；仍需模型能力满足条件 */
+        viewMedia?: boolean;
+    };
+};
+
 /** 运行上下文 */
 /** 已落盘的媒体及其原始描述 */
 export type IngestedAttachment = {
@@ -1091,6 +1108,9 @@ export class Session{
     private _attachmentManager?: AttachmentFileManager;
     private _attachmentIngestor?: AttachmentIngestor;
 
+    /** Session 级 host 内置工具注册策略 */
+    private readonly _hostTools: { askUser: boolean; viewMedia: boolean };
+
     /** 当前会话的运行期附件映射；只在内存中存在，不进入 SessionData */
     private _attachmentRefs: AttachmentWireMap = new Map();
 
@@ -1114,11 +1134,13 @@ export class Session{
         history?: SessionHistory,
         options: SessionRuntimeOptions = {},
         attachmentManager?: AttachmentFileManager,
+        hostOptions?: SessionHostOptions,
     ){
         this._provider = provider;
         this._currentSession = history;
         this._runtimeOptions = { ...options };
         this._attachmentManager = attachmentManager;
+        this._hostTools = normalizeHostOptions(hostOptions);
         this._attachmentIngestor = attachmentManager === undefined
             ? undefined
             : new AttachmentIngestor(attachmentManager);
@@ -1346,13 +1368,16 @@ export class Session{
             );
         }
 
-        const enableUserInput = options.enableUserInput ?? true;
-        if (typeof enableUserInput !== "boolean"){
+        const requestedUserInput = options.enableUserInput ?? true;
+        if (typeof requestedUserInput !== "boolean"){
             throw new SessionError(
                 SessionErrorType.InvalidRequest,
                 `enableUserInput must be a boolean, got ${String(options.enableUserInput)}`,
             );
         }
+
+        // host 工具是会话级总开关，run 级 enableUserInput 只能在此基础上再次关闭。
+        const enableUserInput = this._hostTools.askUser && requestedUserInput;
 
         const history = this._currentSession;
         const provider = this._provider;
@@ -1392,7 +1417,9 @@ export class Session{
         const enableTools = provider.supportsTools
             && modelChatCapabilities?.tools !== false;
         const enableThinking = modelChatCapabilities?.thinking !== false;
-        const enableViewMedia = enableTools && selfViewableModalities.length > 0;
+        const enableViewMedia = enableTools
+            && this._hostTools.viewMedia
+            && selfViewableModalities.length > 0;
         const snapshot = history.snapshot();
 
         const inputMessage = user(input);
@@ -1773,6 +1800,42 @@ export class Session{
             }
         }
     }
+}
+
+/** 归一化 Session 级 host 工具注册选项；默认保持旧行为 */
+function normalizeHostOptions(
+    options: SessionHostOptions | undefined,
+): { askUser: boolean; viewMedia: boolean }{
+    const value = options?.hostTools;
+    if (value === undefined || value === true){
+        return { askUser: true, viewMedia: true };
+    }
+    if (value === false){
+        return { askUser: false, viewMedia: false };
+    }
+    if (typeof value !== "object" || value === null || Array.isArray(value)){
+        throw new SessionError(
+            SessionErrorType.InvalidRequest,
+            "hostTools must be a boolean or an object",
+        );
+    }
+    if (value.askUser !== undefined && typeof value.askUser !== "boolean"){
+        throw new SessionError(
+            SessionErrorType.InvalidRequest,
+            "hostTools.askUser must be a boolean",
+        );
+    }
+    if (value.viewMedia !== undefined && typeof value.viewMedia !== "boolean"){
+        throw new SessionError(
+            SessionErrorType.InvalidRequest,
+            "hostTools.viewMedia must be a boolean",
+        );
+    }
+
+    return {
+        askUser: value.askUser ?? true,
+        viewMedia: value.viewMedia ?? true,
+    };
 }
 
 /** 合并流式与最终媒体；final 结果覆盖同 sourceId 的流式片段 */

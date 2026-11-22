@@ -658,6 +658,10 @@ new DeepSeekProvider({
   - 参数 `contentHash` 来自 assistant 消息中的 `[media:<contentHash>]` 标记；
   - 工具结果携带 attachment，由 Session 重新 `ensureFile` 后发送给模型；
   - 只允许当前会话 assistant 消息中出现过的媒体，不读取任意附件。
+- host 内置工具注册可在 Session 构造时配置：
+  - 第 5 个参数 `hostOptions.hostTools` 支持 `false` 整体关闭，或 `{ askUser?, viewMedia? }` 单独关闭；
+  - 省略时保持旧行为；`enableUserInput` 仍是 run 级开关，与会话级配置取交集；
+  - `createNewSession` 的第 4 个参数 `hostOptions` 行为一致。
 - host 工具按完整工具名去重：Provider 已经提供同名工具时不会重复广告。
 - 三档权限：
   - `readonly`：只允许 `readOnlyHint === true` 的工具，其余直接拒绝
