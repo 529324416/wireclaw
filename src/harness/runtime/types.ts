@@ -58,7 +58,7 @@ export type GraphRunOptions = {
     maxConcurrency?: number;
 };
 
-export type NodeRunRecordStatus = "completed" | "failed" | "cancelled";
+export type NodeRunRecordStatus = "completed" | "failed" | "cancelled" | "skipped";
 
 export type NodeRunRecord = {
     nodeId: string;

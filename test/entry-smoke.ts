@@ -26,6 +26,8 @@ assert.equal("NodePresetLibrary" in root, true);
 assert.equal("instantiateNodePreset" in root, true);
 assert.equal("serializeNodePreset" in root, true);
 assert.equal("createEditorCatalog" in root, true);
+assert.equal("BranchNode" in root, true);
+assert.equal("MergeNode" in root, true);
 assert.equal("LocalToolProvider" in root, false, "core must not expose local tools");
 assert.equal("McpStdioTransport" in root, false, "core must not expose stdio transport");
 

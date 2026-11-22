@@ -26,6 +26,10 @@ export type PortValueType = (typeof PORT_VALUE_TYPES)[number];
 export const OUTPUT_MODES = ["value", "stream"] as const;
 export type OutputMode = (typeof OUTPUT_MODES)[number];
 
+/** 单输入端口收到多个 value 上游时的汇合策略 */
+export const JOIN_POLICIES = ["exclusive", "all", "error"] as const;
+export type JoinPolicy = (typeof JOIN_POLICIES)[number];
+
 export type InputPortSpec = {
     name: string;
     type: PortValueType;
@@ -36,6 +40,9 @@ export type InputPortSpec = {
 
     /** 是否允许多个上游同时连入；默认 false */
     multiple?: boolean;
+
+    /** 多个 value/stream 上游的汇合策略；默认单值输入为 exclusive */
+    join?: JoinPolicy;
     description?: string;
 };
 
@@ -48,6 +55,9 @@ export type OutputPortSpec = {
 
     /** 未显式配置节点 outputMode 时使用 */
     defaultMode?: OutputMode;
+
+    /** 同一分支节点的多个输出共享的互斥组标签；用于编辑器/静态分析 */
+    exclusiveGroup?: string;
     description?: string;
 };
 
@@ -159,6 +169,11 @@ export function isOutputMode(value: unknown): value is OutputMode{
     return value === "value" || value === "stream";
 }
 
+export function isJoinPolicy(value: unknown): value is JoinPolicy{
+    return typeof value === "string"
+        && (JOIN_POLICIES as readonly string[]).includes(value);
+}
+
 export function isModelBinding(value: unknown): value is ModelBinding{
     if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
     const record = value as Record<string, unknown>;
@@ -214,6 +229,11 @@ export function isNodeInputValues(value: unknown): value is NodeInputValues{
 }
 
 /** 输出端口 -> 输入端口 的类型兼容规则；any 是唯一通配 */
+/** HarnessValue 本身是 JSON-safe 的；用于 multiple fan-in 的 JSON 数组聚合 */
+export function harnessValueToJson(value: HarnessValue): JsonValue{
+    return value as unknown as JsonValue;
+}
+
 export function isPortTypeCompatible(
     source: PortValueType,
     target: PortValueType,

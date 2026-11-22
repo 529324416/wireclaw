@@ -13,6 +13,7 @@ import type { GraphNode } from "./node";
 import {
     isHarnessValue,
     isHarnessValueCompatible,
+    isJoinPolicy,
     isPortTypeCompatible,
     isPortValueType,
     isToolSetSpec,
@@ -209,10 +210,13 @@ export class Graph{
             const incoming = (incomingCounts.get(incomingKey) ?? 0) + 1;
             incomingCounts.set(incomingKey, incoming);
 
-            if (incoming > 1 && toPort?.multiple !== true){
+            if (incoming > 1
+                && toPort !== undefined
+                && toPort.multiple !== true
+                && toPort.join === "error"){
                 issues.push({
                     code: HarnessErrorCode.MultipleInputEdges,
-                    message: `Input "${toNode.id}.${edge.to.port}" accepts a single edge`,
+                    message: `Input "${toNode.id}.${edge.to.port}" explicitly rejects multiple edges`,
                     nodeId: toNode.id,
                     port: edge.to.port,
                     edgeIndex: index,
@@ -333,6 +337,45 @@ function validatePorts(node: GraphNode, issues: HarnessIssue[]): void{
             issues.push({
                 code: HarnessErrorCode.InvalidPort,
                 message: `Input port "${port.name}" has an invalid type`,
+                nodeId: node.id,
+                port: port.name,
+            });
+        }
+
+        if (port.multiple === true
+            && port.mode !== "stream"
+            && port.type !== "json"
+            && port.type !== "any"){
+            issues.push({
+                code: HarnessErrorCode.InvalidPort,
+                message: `Multiple value input "${port.name}" must use json or any`,
+                nodeId: node.id,
+                port: port.name,
+            });
+        }
+        if (port.join !== undefined && !isJoinPolicy(port.join)){
+            issues.push({
+                code: HarnessErrorCode.InvalidPort,
+                message: `Input port "${port.name}" has an unsupported join policy`,
+                nodeId: node.id,
+                port: port.name,
+            });
+        }
+        if (port.join === "all"
+            && port.multiple !== true
+            && port.mode !== "stream"){
+            issues.push({
+                code: HarnessErrorCode.InvalidPort,
+                message: `Input port "${port.name}" must set multiple: true when join is all`,
+                nodeId: node.id,
+                port: port.name,
+            });
+        }
+        if (port.multiple === true
+            && (port.join === "exclusive" || port.join === "error")){
+            issues.push({
+                code: HarnessErrorCode.InvalidPort,
+                message: `Input port "${port.name}" cannot combine multiple with join ${port.join}`,
                 nodeId: node.id,
                 port: port.name,
             });

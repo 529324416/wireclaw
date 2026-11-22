@@ -250,7 +250,6 @@ section("边、端口和环");
         new Edge({ nodeId: "source", port: "out" }, { nodeId: "pass", port: "in" }),
     ], { id: "duplicate-edge" });
     assert.ok(issuesOf(duplicateEdge).includes(HarnessErrorCode.DuplicateEdge));
-    assert.ok(issuesOf(duplicateEdge).includes(HarnessErrorCode.MultipleInputEdges));
     console.log("PASS 类型不兼容、未知端口、环、重复边均被识别");
 }
 
@@ -270,14 +269,14 @@ section("扇入与重复节点");
         new Edge({ nodeId: "s1", port: "out" }, { nodeId: "pass", port: "in" }),
         new Edge({ nodeId: "s2", port: "out" }, { nodeId: "pass", port: "in" }),
     ], { id: "single-input" });
-    assert.ok(issuesOf(duplicateInput).includes(HarnessErrorCode.MultipleInputEdges));
+    assert.ok(!issuesOf(duplicateInput).includes(HarnessErrorCode.MultipleInputEdges));
 
     const duplicateNode = new Graph([
         new TextSourceNode("same"),
         new TextSourceNode("same"),
     ], [], { id: "duplicate-node" });
     assert.ok(issuesOf(duplicateNode).includes(HarnessErrorCode.DuplicateNodeId));
-    console.log("PASS multiple 端口允许扇入，单输入端口拒绝重复连边，重复节点 ID 被识别");
+    console.log("PASS multiple 端口允许扇入，单输入多边由 exclusive join 处理，重复节点 ID 被识别");
 }
 
 section("反序列化与注册表");

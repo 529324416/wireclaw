@@ -14,6 +14,7 @@ export const HarnessErrorCode = {
     PortTypeMismatch: "port_type_mismatch",
     MissingInput: "missing_input",
     MultipleInputEdges: "multiple_input_edges",
+    AmbiguousJoin: "ambiguous_join",
     CycleDetected: "cycle_detected",
     InvalidValue: "invalid_value",
     InvalidRequest: "invalid_request",

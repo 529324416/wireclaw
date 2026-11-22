@@ -56,6 +56,7 @@
     "test:live": "node ./tools/test-runner.mjs --all",
     "example:harness": "node ./tools/example-runner.mjs examples/harness/run-minimal.ts",
     "example:preset": "node ./tools/example-runner.mjs examples/harness/run-preset.ts",
+    "example:branch": "node ./tools/example-runner.mjs examples/harness/run-branch.ts",
     "typecheck": "npm run typecheck:node && npm run typecheck:browser && npm run typecheck:test",
     "typecheck:node": "node ./node_modules/typescript/bin/tsc --noEmit",
     "typecheck:browser": "node ./node_modules/typescript/bin/tsc --noEmit -p tsconfig.browser.json",

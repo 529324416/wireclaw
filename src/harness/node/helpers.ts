@@ -102,6 +102,22 @@ export function requireModelBinding(value: HarnessValue | undefined): ModelBindi
     return value.model;
 }
 
+export function readBooleanCondition(value: HarnessValue | undefined): boolean{
+    if (value?.type === "json" && typeof value.value === "boolean"){
+        return value.value;
+    }
+    if (value?.type === "text"){
+        const normalized = value.text.trim().toLowerCase();
+        if (normalized === "true") return true;
+        if (normalized === "false") return false;
+    }
+
+    throw new HarnessError(
+        HarnessErrorCode.InvalidValue,
+        "Condition must be a boolean json value (or \"true\"/\"false\" text)",
+    );
+}
+
 export function requireText(value: HarnessValue | undefined, port: string): string{
     if (value === undefined || value.type !== "text"){
         throw new HarnessError(

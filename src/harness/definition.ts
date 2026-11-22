@@ -13,6 +13,8 @@ export const HarnessBuiltinNodeType = {
     AgentRun: "core.agent.run",
     ToolSet: "core.toolset",
     Choice: "core.choice",
+    Branch: "core.branch",
+    Merge: "core.merge",
     EventTrigger: "core.eventTrigger",
     LogSink: "core.log",
 } as const;

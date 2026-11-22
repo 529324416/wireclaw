@@ -42,6 +42,12 @@ export type GraphEvent =
         at: number;
     }
     | {
+        type: "node:skipped";
+        runId: string;
+        nodeId: string;
+        at: number;
+    }
+    | {
         type: "node:error";
         runId: string;
         nodeId: string;

@@ -1,11 +1,13 @@
 import { HarnessBuiltinNodeType } from "../definition";
 import { NodeTypeRegistry } from "../graph/registry";
 import { AgentRunNode } from "./agent-run";
+import { BranchNode } from "./branch";
 import { ChoiceNode } from "./choice";
 import { ConstantNode } from "./constant";
 import { EventTriggerNode } from "./event-trigger";
 import { InputNode } from "./input";
 import { LogSinkNode } from "./log-sink";
+import { MergeNode } from "./merge";
 import { ModelNode } from "./model";
 import { ModelCallNode } from "./model-call";
 import { OutputNode } from "./output";
@@ -19,6 +21,8 @@ export * from "./model-call";
 export * from "./agent-run";
 export * from "./tool-set";
 export * from "./choice";
+export * from "./branch";
+export * from "./merge";
 export * from "./event-trigger";
 export * from "./log-sink";
 export * from "./helpers";
@@ -88,6 +92,22 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         description: "按 boolean 条件选择 whenTrue / whenFalse 的值",
         builtIn: true,
         create: (id, config, inputs, ui) => new ChoiceNode(id, config, inputs, ui),
+    });
+    registry.register({
+        type: HarnessBuiltinNodeType.Branch,
+        version: 1,
+        title: "Branch",
+        description: "按 boolean 条件只激活一条分支，未命中分支 skipped",
+        builtIn: true,
+        create: (id, config, inputs, ui) => new BranchNode(id, config, inputs, ui),
+    });
+    registry.register({
+        type: HarnessBuiltinNodeType.Merge,
+        version: 1,
+        title: "Merge",
+        description: "汇合 BranchNode 的可选分支输出",
+        builtIn: true,
+        create: (id, config, inputs, ui) => new MergeNode(id, config, inputs, ui),
     });
     registry.register({
         type: HarnessBuiltinNodeType.EventTrigger,

@@ -7,6 +7,7 @@ import type { GraphEvent, GraphEventListener, GraphRunStatus } from "../graph/ev
 import type { Graph } from "../graph/graph";
 import type { GraphNode, NodeContext, NodeServices } from "../graph/node";
 import {
+    harnessValueToJson,
     isHarnessValue,
     isHarnessValueCompatible,
     supportsOutputMode,
@@ -55,7 +56,8 @@ export class GraphRun{
     private readonly _channels = new Map<string, OutputChannel<HarnessValue>>();
     private readonly _streamPorts = new Set<string>();
     private readonly _inputEdges = new Map<string, Map<string, Edge[]>>();
-    private readonly _dependents = new Map<string, string[]>();
+    private readonly _outgoingEdges = new Map<string, Edge[]>();
+    private readonly _edgeStates = new Map<string, "value" | "skipped">();
     private readonly _pending = new Map<string, number>();
     private readonly _ready: string[] = [];
     private readonly _startedAt = Date.now();
@@ -248,12 +250,10 @@ export class GraphRun{
     }
 
     private _prepareExecution(): void{
-        const dependencies = new Map<string, Set<string>>();
-
         for (const node of this._graph.nodes){
-            dependencies.set(node.id, new Set());
-            this._dependents.set(node.id, []);
+            this._pending.set(node.id, 0);
             this._inputEdges.set(node.id, new Map());
+            this._outgoingEdges.set(node.id, []);
             for (const port of node.outputs){
                 this._channels.set(
                     channelKey(node.id, port.name),
@@ -263,32 +263,37 @@ export class GraphRun{
         }
 
         for (const edge of this._graph.edges){
-            const from = dependencies.get(edge.from.nodeId);
-            const to = dependencies.get(edge.to.nodeId);
-            if (from === undefined || to === undefined) continue;
+            if (this._graph.getNode(edge.from.nodeId) === undefined
+                || this._graph.getNode(edge.to.nodeId) === undefined){
+                continue;
+            }
+
+            const outgoing = this._outgoingEdges.get(edge.from.nodeId);
+            if (outgoing !== undefined) outgoing.push(edge);
+
+            const byPort = this._inputEdges.get(edge.to.nodeId);
+            if (byPort !== undefined){
+                const edges = byPort.get(edge.to.port) ?? [];
+                edges.push(edge);
+                byPort.set(edge.to.port, edges);
+            }
 
             const targetPort = this._graph.getNode(edge.to.nodeId)
                 ?.inputs.find((port) => port.name === edge.to.port);
-            if (targetPort?.mode !== "stream"){
-                to.add(edge.from.nodeId);
-            } else {
+            if (targetPort?.mode === "stream"){
                 this._streamPorts.add(channelKey(edge.from.nodeId, edge.from.port));
+            } else {
+                this._pending.set(
+                    edge.to.nodeId,
+                    (this._pending.get(edge.to.nodeId) ?? 0) + 1,
+                );
             }
-
-            const byPort = this._inputEdges.get(edge.to.nodeId);
-            if (byPort === undefined) continue;
-            const edges = byPort.get(edge.to.port) ?? [];
-            edges.push(edge);
-            byPort.set(edge.to.port, edges);
         }
 
-        for (const [nodeId, deps] of dependencies){
-            this._pending.set(nodeId, deps.size);
-            for (const from of deps){
-                const next = this._dependents.get(from);
-                if (next !== undefined) next.push(nodeId);
+        for (const node of this._graph.nodes){
+            if ((this._pending.get(node.id) ?? 0) === 0){
+                this._ready.push(node.id);
             }
-            if (deps.size === 0) this._ready.push(nodeId);
         }
     }
 
@@ -345,8 +350,26 @@ export class GraphRun{
         });
 
         try{
-            const inputs = this._resolveInputs(node);
-            const outputs = await node.execute(this._createContext(node), inputs);
+            const resolution = this._resolveInputs(node);
+            if (resolution.skipped){
+                this._closeNodeChannels(nodeId);
+                record.status = "skipped";
+                record.endedAt = Date.now();
+                this._records.push(record);
+                this._emit({
+                    type: "node:skipped",
+                    runId: this.id,
+                    nodeId,
+                    at: record.endedAt,
+                });
+                this._resolveOutgoing(nodeId, undefined);
+                return;
+            }
+
+            const outputs = await node.execute(
+                this._createContext(node),
+                resolution.inputs,
+            );
 
             if (this._abort.signal.aborted){
                 throw new HarnessError(
@@ -380,7 +403,7 @@ export class GraphRun{
                 outputs,
                 at: record.endedAt,
             });
-            this._notifyDependents(nodeId);
+            this._resolveOutgoing(nodeId, outputs);
         }catch(error){
             this._closeNodeChannels(nodeId);
             const cancelled = this._abort.signal.aborted;
@@ -404,9 +427,17 @@ export class GraphRun{
         }
     }
 
-    private _resolveInputs(node: GraphNode): Record<string, HarnessValue>{
+    private _resolveInputs(node: GraphNode): {
+        inputs: Record<string, HarnessValue>;
+        skipped: boolean;
+    }{
         const inputs: Record<string, HarnessValue> = {};
         const byPort = this._inputEdges.get(node.id);
+
+        let connectedEdges = 0;
+        let skippedEdges = 0;
+        let availableValues = 0;
+        let requiredSkipped = false;
 
         for (const port of node.inputs){
             const edges = byPort?.get(port.name) ?? [];
@@ -420,10 +451,12 @@ export class GraphRun{
                 }
                 continue;
             }
+
             if (edges.length === 0){
                 const fallback = node.inputDefaults[port.name];
                 if (fallback !== undefined){
                     inputs[port.name] = fallback;
+                    availableValues += 1;
                 } else if (port.required === true){
                     throw new HarnessError(
                         HarnessErrorCode.MissingInput,
@@ -434,35 +467,70 @@ export class GraphRun{
                 continue;
             }
 
-            if (edges.length > 1){
-                if (port.multiple !== true){
+            if (edges.length > 1
+                && port.multiple !== true
+                && port.join === "error"){
+                throw new HarnessError(
+                    HarnessErrorCode.MultipleInputEdges,
+                    `Input "${node.id}.${port.name}" explicitly rejects multiple edges`,
+                    { nodeId: node.id, port: port.name },
+                );
+            }
+
+            connectedEdges += edges.length;
+            const values: HarnessValue[] = [];
+
+            for (const edge of edges){
+                const state = this._edgeStates.get(edge.key);
+                if (state === "skipped"){
+                    skippedEdges += 1;
+                    continue;
+                }
+                if (state !== "value"){
                     throw new HarnessError(
-                        HarnessErrorCode.MultipleInputEdges,
-                        `Input "${node.id}.${port.name}" accepts a single edge`,
+                        HarnessErrorCode.MissingValue,
+                        `Input "${node.id}.${port.name}" is waiting for "${edge.from.nodeId}.${edge.from.port}"`,
                         { nodeId: node.id, port: port.name },
                     );
                 }
-                throw new HarnessError(
-                    HarnessErrorCode.NotImplemented,
-                    `Fan-in input "${node.id}.${port.name}" is not supported by the Step 2 runtime`,
-                    { nodeId: node.id, port: port.name },
-                );
+
+                const source = this._outputs.get(edge.from.nodeId);
+                const value = source?.[edge.from.port];
+                if (value === undefined){
+                    skippedEdges += 1;
+                    continue;
+                }
+                values.push(value);
             }
 
-            const edge = edges[0];
-            const source = this._outputs.get(edge.from.nodeId);
-            const value = source?.[edge.from.port];
-            if (value === undefined){
-                throw new HarnessError(
-                    HarnessErrorCode.MissingValue,
-                    `Input "${node.id}.${port.name}" has no value from "${edge.from.nodeId}.${edge.from.port}"`,
-                    { nodeId: node.id, port: port.name },
-                );
+            if (values.length === 0){
+                if (port.required === true) requiredSkipped = true;
+                continue;
             }
-            inputs[port.name] = value;
+
+            if (port.multiple === true){
+                inputs[port.name] = {
+                    type: "json",
+                    value: values.map(harnessValueToJson),
+                };
+                availableValues += values.length;
+            } else {
+                if (values.length > 1){
+                    throw new HarnessError(
+                        HarnessErrorCode.AmbiguousJoin,
+                        `Input "${node.id}.${port.name}" received ${String(values.length)} values; `
+                            + "use join \"all\" with multiple: true, an explicit MergeNode, or make the sources exclusive",
+                        { nodeId: node.id, port: port.name },
+                    );
+                }
+                inputs[port.name] = values[0];
+                availableValues += 1;
+            }
         }
 
-        return inputs;
+        const skipped = requiredSkipped
+            || (connectedEdges > 0 && skippedEdges === connectedEdges && availableValues === 0);
+        return { inputs, skipped };
     }
 
     private _validateOutputs(
@@ -495,11 +563,21 @@ export class GraphRun{
         }
     }
 
-    private _notifyDependents(nodeId: string): void{
-        for (const next of this._dependents.get(nodeId) ?? []){
-            const remaining = (this._pending.get(next) ?? 1) - 1;
-            this._pending.set(next, remaining);
-            if (remaining === 0) this._ready.push(next);
+    private _resolveOutgoing(
+        nodeId: string,
+        outputs: NodeOutputValues | undefined,
+    ): void{
+        for (const edge of this._outgoingEdges.get(nodeId) ?? []){
+            const targetPort = this._graph.getNode(edge.to.nodeId)
+                ?.inputs.find((port) => port.name === edge.to.port);
+            if (targetPort?.mode === "stream") continue;
+
+            const value = outputs?.[edge.from.port];
+            this._edgeStates.set(edge.key, value === undefined ? "skipped" : "value");
+
+            const remaining = (this._pending.get(edge.to.nodeId) ?? 1) - 1;
+            this._pending.set(edge.to.nodeId, remaining);
+            if (remaining === 0) this._ready.push(edge.to.nodeId);
         }
     }
 
@@ -574,24 +652,28 @@ export class GraphRun{
 
         const edges = this._inputEdges.get(node.id)?.get(portName) ?? [];
         if (edges.length === 0) return emptyStream();
-        if (edges.length > 1){
+        if (edges.length > 1 && port.multiple !== true){
             throw new HarnessError(
-                HarnessErrorCode.NotImplemented,
-                `Multiple stream sources for "${node.id}.${portName}" are not supported yet`,
+                HarnessErrorCode.MultipleInputEdges,
+                `Stream input "${node.id}.${portName}" accepts a single source`,
                 { nodeId: node.id, port: portName },
             );
         }
 
-        const edge = edges[0];
-        const channel = this._channels.get(channelKey(edge.from.nodeId, edge.from.port));
-        if (channel === undefined){
-            throw new HarnessError(
-                HarnessErrorCode.MissingValue,
-                `Stream source "${edge.from.nodeId}.${edge.from.port}" is not available`,
-                { nodeId: node.id, port: portName },
-            );
+        const channels: OutputChannel<HarnessValue>[] = [];
+        for (const edge of edges){
+            const channel = this._channels.get(channelKey(edge.from.nodeId, edge.from.port));
+            if (channel === undefined){
+                throw new HarnessError(
+                    HarnessErrorCode.MissingValue,
+                    `Stream source "${edge.from.nodeId}.${edge.from.port}" is not available`,
+                    { nodeId: node.id, port: portName },
+                );
+            }
+            channels.push(channel);
         }
-        return channel;
+
+        return channels.length === 1 ? channels[0] : combineAllStreams(channels);
     }
 
     private _emitNodeChunk(
@@ -709,6 +791,45 @@ function channelKey(nodeId: string, port: string): string{
 async function* emptyStream(): AsyncGenerator<HarnessValue>{
     // 可选 stream 输入没有上游时立即结束
     return;
+}
+
+/** 多个 stream 源按“谁先到谁先出”汇合；所有通道关闭后结束 */
+async function* combineAllStreams(
+    channels: readonly OutputChannel<HarnessValue>[],
+): AsyncGenerator<HarnessValue>{
+    const queue: HarnessValue[] = [];
+    let wake: (() => void) | undefined;
+    let remaining = channels.length;
+
+    const notify = (): void =>{
+        const resolve = wake;
+        wake = undefined;
+        resolve?.();
+    };
+
+    for (const channel of channels){
+        void (async () =>{
+            try{
+                for await (const chunk of channel){
+                    queue.push(chunk);
+                    notify();
+                }
+            }finally{
+                remaining -= 1;
+                notify();
+            }
+        })();
+    }
+
+    while (remaining > 0 || queue.length > 0){
+        if (queue.length > 0){
+            yield queue.shift() as HarnessValue;
+            continue;
+        }
+        await new Promise<void>((resolve) =>{
+            wake = resolve;
+        });
+    }
 }
 
 function normalizeConcurrency(value: number | undefined): number{

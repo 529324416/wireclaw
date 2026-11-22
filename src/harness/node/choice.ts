@@ -9,6 +9,7 @@ import type {
     NodeOutputValues,
     OutputPortSpec,
 } from "../graph/type";
+import { readBooleanCondition } from "./helpers";
 
 /**
  * ChoiceNode：值选择。
@@ -41,7 +42,7 @@ export class ChoiceNode extends GraphNode{
         _ctx: NodeContext,
         inputs: NodeInputValues,
     ): Promise<NodeOutputValues>{
-        const selected: HarnessValue | undefined = readCondition(inputs.condition)
+        const selected: HarnessValue | undefined = readBooleanCondition(inputs.condition)
             ? inputs.whenTrue
             : inputs.whenFalse;
 
@@ -55,20 +56,4 @@ export class ChoiceNode extends GraphNode{
 
         return { value: selected };
     }
-}
-
-function readCondition(value: HarnessValue | undefined): boolean{
-    if (value?.type === "json" && typeof value.value === "boolean"){
-        return value.value;
-    }
-    if (value?.type === "text"){
-        const normalized = value.text.trim().toLowerCase();
-        if (normalized === "true") return true;
-        if (normalized === "false") return false;
-    }
-
-    throw new HarnessError(
-        HarnessErrorCode.InvalidValue,
-        "ChoiceNode condition must be a boolean json value (or \"true\"/\"false\" text)",
-    );
 }
