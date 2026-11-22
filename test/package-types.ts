@@ -1,4 +1,11 @@
-import { AttachmentFileManager, McpToolProvider, createNewSession } from "wireclaw";
+import {
+    AttachmentFileManager,
+    Graph,
+    McpToolProvider,
+    NodeTypeRegistry,
+    createNewSession,
+} from "wireclaw";
+import type { GraphDocument } from "wireclaw";
 import { LocalFileHost, readLocalSourcePath } from "wireclaw/node";
 import {
     LocalToolProvider,
@@ -9,7 +16,9 @@ import type { ClientMcpServerConfig, McpTransportConfig } from "wireclaw/client"
 import { IndexedDbFileHost, MemoryFileHost, OpfsFileHost } from "wireclaw/browser";
 
 void AttachmentFileManager;
+void Graph;
 void McpToolProvider;
+void NodeTypeRegistry;
 void createNewSession;
 void LocalFileHost;
 void readLocalSourcePath;
@@ -23,5 +32,8 @@ void OpfsFileHost;
 const transport: McpTransportConfig = { type: "http", url: "http://127.0.0.1:5000/mcp" };
 const config: ClientMcpServerConfig = { id: "mcp", transport };
 void config;
+
+const graphDocument: GraphDocument = { version: 1, id: "demo", nodes: [], edges: [] };
+void graphDocument;
 
 console.log("PASS package type declarations");

@@ -13,7 +13,8 @@
     "src/session/**/*.ts",
     "src/file/**/*.ts",
     "src/platform/**/*.ts",
-    "src/tool/**/*.ts"
+    "src/tool/**/*.ts",
+    "src/harness/**/*.ts"
   ],
   "exclude": [
     "node_modules",

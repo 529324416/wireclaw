@@ -6,3 +6,4 @@ export * from "./session";
 export * from "./tool";
 export * from "./platform";
 export * from "./create";
+export * from "./harness";

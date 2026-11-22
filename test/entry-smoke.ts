@@ -13,6 +13,10 @@ assert.equal("McpToolProvider" in root, true);
 assert.equal("createNewSession" in root, true);
 assert.equal("createNewSession" in browser, true);
 assert.equal("createNewSession" in node, true);
+assert.equal("Graph" in root, true, "core must expose the harness graph model");
+assert.equal("Graph" in browser, true, "browser entry must expose the harness graph model");
+assert.equal("Graph" in node, true, "node entry must expose the harness graph model");
+assert.equal("NodeTypeRegistry" in root, true);
 assert.equal("LocalToolProvider" in root, false, "core must not expose local tools");
 assert.equal("McpStdioTransport" in root, false, "core must not expose stdio transport");
 

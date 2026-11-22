@@ -857,6 +857,42 @@ await registry.closeAll();
 - stdio 传输由 `src/client` 提供，已通过实机联调（Python 子进程）。
 - 更多待办见根目录 `todo.md`。
 
+## Harness Graph（Step 1：对象模型与序列化）
+
+当前状态：已完成 Graph 的 TypeScript 对象模型、校验与 JSON 序列化；执行器、内建节点和流式运行时在后续步骤接入。
+
+```text
+src/harness/
+  index.ts            公共入口
+  definition.ts       Graph 文档版本与内建节点类型 ID 预留表
+  base/               HarnessError / HarnessIssue、内部 JSON 工具
+  graph/
+    type.ts           JsonValue / HarnessValue / 端口 / ModelBinding / ToolSetSpec
+    node.ts           GraphNode、NodeContext 契约
+    edge.ts           Edge / PortAddress
+    registry.ts       NodeTypeRegistry（宿主注册自定义节点）
+    event.ts          GraphEvent / GraphEventListener（运行时事件契约）
+    graph.ts          Graph：validate / assertValid / toJSON / fromJSON
+  serialize/
+    document.ts       GraphDocument / NodeDocument
+    serializer.ts     serializeGraph / deserializeGraph
+    plugin.ts         序列化插件接口（占位，供版本迁移/私有字段使用）
+  node/               内建节点实现（Step 2 开始填充）
+```
+
+核心设计：
+
+- **TS 优先**：Node、Edge、Graph 是运行时对象；JSON 只用于持久化、导出和编辑器交换。
+- **端口与值**：端口声明 `PortValueType`（text/json/model/toolset/attachment/attachments/any）；值统一为 `HarnessValue`；媒体只保存 `AttachmentRef.contentHash`。
+- **Value / Stream 预留**：输出端口用 `supportedModes` / `defaultMode` 声明；Step 1 只实现契约，节点 `execute` 的 stream 输出通过 `ctx.emit`，value 输出通过返回值。后续切换默认流式不需要改 Graph/Edge 结构。
+- **自定义节点**：宿主用 `NodeTypeRegistry.register({ type, version, create, configSchema? })` 注册；JSON 只保存 `type + typeVersion + config + inputs + ui`，不携带可执行代码；未知类型或版本不匹配会拒绝反序列化。
+- **校验**：节点 ID/端口唯一、边两端节点与端口存在、端口类型兼容、必填输入（边或默认值）、单输入端口只能一条边（`multiple: true` 例外）、重复边、环、图级参数/事件声明。
+- **GraphDocument**：`version: 1`；显式 `nodes` 与 `edges`；节点 config/inputs/ui 必须是 JSON-safe；`ui` 仅服务设计器，运行时忽略。
+- **反序列化**：`Graph.fromJSON(doc, { registry })` 默认执行完整校验；编辑器可用 `{ validate: false }` 载入未完成草稿。
+- **序列化插件**：`HarnessSerializationPlugin` 预留节点迁移、私有字段编解码和第三方节点包接入点；当前内置逻辑只依赖 NodeTypeRegistry。
+
+尚未实现：`Graph.run()`、调度器、节点执行上下文服务、EventTrigger 实际分发、内建 input/output/model/model.call/agent.run 节点。
+
 ## ComfyUI Qwen-Image Tool
 
 - 临时测试工具位于根目录 `tools/`，不属于 `wireclaw/client` 包入口，也不会随 npm 包分发。
