@@ -9,7 +9,10 @@
     "tools/**/*.ts",
     "examples/**/*.ts",
     "test/**/*.ts",
-    "client.ts"
+    "client.ts",
+    "harness.ts",
+    "harness-runtime.ts",
+    "harness-comic.ts"
   ],
   "exclude": [
     "node_modules",

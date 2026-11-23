@@ -13,6 +13,7 @@ import type {
 import { ToolSet } from "../runtime/tool-set";
 import { isChatProvider } from "../../session/protocol";
 import { system } from "../../session/message";
+import type { Message } from "../../session/message";
 import {
     RunStatus,
     Session,
@@ -249,7 +250,7 @@ export class AgentRunNode extends GraphNode{
             text: { type: "text", text: contentToText(assistant.content) },
             attachments: {
                 type: "attachments",
-                attachments: contentAttachments(assistant.content),
+                attachments: collectAttachments(run.pendingMessages),
             },
             usage: { type: "json", value: usageToJson(assistant.usage) },
         };
@@ -350,4 +351,22 @@ function readRuntimeOptions(
         ...(thinkingLv === undefined ? {} : { thinkingLv }),
         ...(temperature === undefined ? {} : { temperature }),
     };
+}
+
+function collectAttachments(
+    messages: readonly Message[],
+): ReturnType<typeof contentAttachments>{
+    const seen = new Set<string>();
+    const attachments: ReturnType<typeof contentAttachments>[number][] = [];
+
+    for (const message of messages){
+        if (message.role !== "assistant" && message.role !== "tool") continue;
+        for (const attachment of contentAttachments(message.content)){
+            if (seen.has(attachment.contentHash)) continue;
+            seen.add(attachment.contentHash);
+            attachments.push(attachment);
+        }
+    }
+
+    return attachments;
 }

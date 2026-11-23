@@ -27,6 +27,6 @@
     "resolveJsonModule": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "tools/**/*.ts", "client.ts"],
+  "include": ["src/**/*.ts", "tools/**/*.ts", "client.ts", "harness.ts", "harness-runtime.ts", "harness-comic.ts"],
   "exclude": ["node_modules", "dist", "test", "test.ts"]
 }

@@ -17,6 +17,7 @@ import type { GraphRunResult } from "../runtime/types";
 import {
     errorText,
     readConfig,
+    readOptionalBoolean,
     readOptionalPositiveInteger,
 } from "./helpers";
 import { runSubgraph } from "./subgraph-runner";
@@ -65,6 +66,12 @@ export class LoopNode extends GraphNode{
                 supportedModes: ["value"],
                 defaultMode: "value",
             },
+            {
+                name: "attachments",
+                type: "attachments",
+                supportedModes: ["value"],
+                defaultMode: "value",
+            },
         ];
     }
 
@@ -94,9 +101,11 @@ export class LoopNode extends GraphNode{
                 { nodeId: this.id },
             );
         }
+        const retryOnError = readOptionalBoolean(config, "retryOnError", this.type) ?? false;
 
         let state: HarnessValue = inputs.initial ?? { type: "json", value: null };
         let iterations = 0;
+        let lastAttachments: Extract<HarnessValue, { type: "attachments" }> | undefined;
 
         for (let index = 0; index < maxIterations; index += 1){
             ctx.publish(`loop.${this.id}.iteration`, {
@@ -134,6 +143,10 @@ export class LoopNode extends GraphNode{
             }
 
             if (result.status !== "completed"){
+                iterations = index + 1;
+                if (retryOnError && index + 1 < maxIterations){
+                    continue;
+                }
                 throw new HarnessError(
                     HarnessErrorCode.NodeExecutionFailed,
                     `${this.type} iteration ${String(index)} failed: `
@@ -143,6 +156,12 @@ export class LoopNode extends GraphNode{
             }
 
             iterations = index + 1;
+            const attachments = result.outputs.attachments;
+            if (attachments?.type === "attachments"
+                && attachments.attachments.length > 0){
+                lastAttachments = attachments;
+            }
+
             const output = result.outputs.json;
             if (output?.type === "json"){
                 const container = output.value;
@@ -158,6 +177,7 @@ export class LoopNode extends GraphNode{
         return {
             value: state,
             iterations: { type: "json", value: iterations },
+            ...(lastAttachments === undefined ? {} : { attachments: lastAttachments }),
         };
     }
 }

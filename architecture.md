@@ -918,8 +918,8 @@ src/harness/
 - **B3 序列化与校验**：Branch / Merge 作为普通节点类型随 Graph JSON 往返；单输入多来源在默认 exclusive 下是合法图；`join` / `multiple` 的矛盾组合在 `Graph.validate()` 阶段报错；并发来源在运行时以 `AmbiguousJoin` 失败，不静默丢值。
 - **SubgraphNode（C1）**：`core.subgraph` 的 config 内嵌一个 `GraphDocument`；外层 `input` / `attachments` 映射到内层 `core.input`，内层 `core.output` 的 `text` / `attachments` / `json` 映射回外层。内层与外层共用同一个 `NodeTypeRegistry`、Provider/Tool/Attachment 服务和运行参数；内层 `custom` 事件以 `subgraph.<nodeId>.<event>` 转发，`node:skipped` 以 `subgraph.<nodeId>.node:skipped` 转发。内层图非法时外层节点以 `InvalidNode` 失败。
 - **core.value**：从 `GraphRunInput.values` 读取命名值，供子图、ForEach、Loop 和宿主参数复用；`required` 默认 true。
-- **ForEachNode（C2）**：输入 `items` JSON 数组，逐项运行内嵌子图；内层通过 `core.value` 读取 `item` / `iteration`。按顺序收集 `resultPort`（默认 text）到 `results` JSON 数组，并输出 `count`；每轮发出 `forEach.<nodeId>.iteration` 事件；当前串行执行，支持外层取消。
-- **LoopNode（C2）**：输入 `initial`，按 `config.maxIterations` 有界运行内嵌子图；内层通过 `core.value` 读取 `state` / `iteration`，`core.output.json` 约定为 `{ state, done? }`，`done === true` 提前结束。输出最终 `value` 和 `iterations`；每轮发出 `loop.<nodeId>.iteration` 事件；当前状态只支持 JSON，串行执行。
+- **ForEachNode（C2）**：输入 `items` JSON 数组，逐项运行内嵌子图；内层通过 `core.value` 读取 `item` / `iteration`。按顺序收集 `resultPort`（默认 text）到 `results` JSON 数组，并输出 `count` 与聚合后的 `attachments`；每轮发出 `forEach.<nodeId>.iteration` 事件；当前串行执行，支持外层取消。
+- **LoopNode（C2/C3）**：输入 `initial`，按 `config.maxIterations` 有界运行内嵌子图；内层通过 `core.value` 读取 `state` / `iteration`，`core.output.json` 约定为 `{ state, done? }`，`done === true` 提前结束。输出最终 `value`、`iterations`，以及最后一轮内层 `attachments`；每轮发出 `loop.<nodeId>.iteration` 事件。`retryOnError: true` 时，内层运行失败也会消耗一轮重试；当前状态只支持 JSON，串行执行。
 - **暂停 / 恢复 / checkpoint（C3）**：`GraphRun.pause()` 停止调度新节点、等待当前活跃节点收尾，返回可 JSON 序列化的 `GraphCheckpoint`；`run.resume()` 在同一 run 继续，`Graph.resume(checkpoint, { host })` 从快照创建新 run。checkpoint 保存已完成输出、运行记录、edge 状态、pending 与 ready 列表，因此恢复时不会重跑已完成节点。暂停/恢复发出 `run:paused` / `run:resumed` 事件；`graphId` 不匹配或结构非法时报 `InvalidCheckpoint`。
 - **Fan-in**：`multiple` value 输入必须声明为 `json` / `any`，运行时把所有非 skipped 上游聚合为 JSON 数组；`multiple` stream 输入按 `join: "all"` 汇合多个通道。
 - **Skipped 传播**：调度器按 value 边逐一记录 `value` / `skipped`；required 输入来自 skipped 分支或全部 connected 输入都 skipped 时，节点 skipped；`node:skipped` 事件与记录状态可被 UI 展示。
@@ -996,6 +996,38 @@ npm run example:composite
   - Loop：maxIterations 内递增状态，内层 `done` 提前结束；
   - Checkpoint：两个延迟节点之间 pause，打印 checkpoint 记录，resume 后完成。
 - 该案例离线运行，不依赖 Provider / 外部服务。
+
+真实流水线门面：
+
+```bash
+npm run harness
+npm run harness -- "自定义主题"
+```
+
+- 根目录 `harness.ts` 是 harness 设计器的可运行门面，串联：
+  - Qwen A 节点生成英文生图提示词；
+  - B 节点通过 `comfyui-image__generateImage` 调用本地 ComfyUI；
+  - Qwen-VL A 节点读取生成图，输出中文说明；
+  - Output 节点同时输出说明文本与图片附件。
+- B 节点现在会从本次 run 的全部消息中收集附件，包括工具媒体结果；因此 ComfyUI 生成的图片可以直接从 `image.attachments` 传给下游/输出。
+- 生成物写入 `harness-output/`（已加入 `.gitignore`）：`<timestamp>-image.png` 与 `<timestamp>-caption.txt`。
+- 依赖：ComfyUI `http://127.0.0.1:8188`、`apikey-qwen.txt` 或 `DASHSCOPE_API_KEY`。
+- 已实机验证：一次完整运行约 40s，输出 1024x1024 图片与中文说明。
+
+四格漫画流水线：
+
+```bash
+npm run comic
+npm run comic -- "自定义故事"
+```
+
+- Qwen 规划恰好 4 个 panel brief，`comic.plan` 解析为 JSON 数组；
+- ForEach 逐格执行；每格内部用 LoopNode（最多 3 次）串联“生图 → Qwen-VL 审查 → 反馈回写状态 → 重做”；
+- LoopNode 输出最后一轮图片附件，ForEach 聚合 4 张附件；
+- 审查通过才结束该格；用尽重试仍失败时，仍输出合图，但门面以非零退出并报告失败格；
+- `retryOnError: true` 同时覆盖临时 Provider/工具失败；
+- ffmpeg 将 4 张图拼成 2×2 contact sheet，写入 `comic-output/`；
+- `COMIC_FORCE_RETRY_PANEL=<index>` 可用于演练重试路径。
 
 尚未实现：基于 `exclusiveGroup` 的静态互斥证明（当前主要靠运行时 exclusive 检查）、stream join 的 `zip` / `combineLatest` 策略、流背压/限流、节点级 ToolSet 与依赖的启动前联合校验、Subgraph/ForEach/Loop 递归深度保护、ForEach 并发执行、非 JSON Loop 状态、checkpoint 持久化存储与流通道重放、GraphEditor UI 本身。
 

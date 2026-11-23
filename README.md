@@ -187,6 +187,60 @@ await session.run("Read-only query", {
 
 See [architecture.md](./architecture.md) for the full semantics of `readonly` / `approval` / `full`.
 
+## Real local pipeline facade
+
+[`harness.ts`](./harness.ts) is the runnable facade for the harness designer. It uses the real
+Qwen chat provider and the local ComfyUI Qwen-Image workflow:
+
+```text
+topic
+  → Qwen: write an English image prompt
+  → B node + ComfyUI generateImage tool: create the image
+  → Qwen-VL: caption the generated image
+  → output text + image attachment
+```
+
+Prerequisites:
+
+- ComfyUI at `http://127.0.0.1:8188` with the workflow from
+  `examples/comfyui/qwen-image-2.1-t2i.json`;
+- a working `apikey-qwen.txt` (or `DASHSCOPE_API_KEY` / `QWEN_API_KEY`).
+
+```bash
+npm run harness
+npm run harness -- "a small robot tending a rooftop garden at sunrise"
+```
+
+Generated files are written under `harness-output/` (ignored by git):
+
+- `<timestamp>-image.png`
+- `<timestamp>-caption.txt` (topic, prompt, caption)
+
+Useful environment variables: `HARNESS_PROMPT_MODEL`, `HARNESS_IMAGE_MODEL`,
+`HARNESS_VISION_MODEL`, `QWEN_BASE_URL`, `COMFYUI_BASE_URL`,
+`WIRECLAW_COMFYUI_WORKFLOW`, `WIRECLAW_COMFYUI_TIMEOUT_MS`.
+
+### Four-panel comic pipeline
+
+[`harness-comic.ts`](./harness-comic.ts) plans a four-panel story, generates each panel through
+ComfyUI, has Qwen-VL review every panel, regenerates failed panels with review feedback, and
+creates a 2×2 contact sheet:
+
+```bash
+npm run comic
+npm run comic -- "a small robot caring for the last sunflower on a rooftop"
+```
+
+- Planner: Qwen creates exactly four panel briefs.
+- Per panel: LoopNode runs generate → review → feedback/retry, up to 3 attempts.
+- `retryOnError` retries transient provider failures as well.
+- Passed images are aggregated by ForEach and merged into `comic-output/<timestamp>-comic.png`.
+- If a panel still fails review after the retry budget, the sheet is still written but the
+  pipeline exits non-zero and reports the failed panel.
+
+Set `COMIC_FORCE_RETRY_PANEL=<index>` to rehearse the retry path for one panel.
+Generated files are ignored under `comic-output/`.
+
 ## Development
 
 ```bash
@@ -198,6 +252,7 @@ npm run example:harness  # minimal runnable Harness graph (no provider needed)
 npm run example:preset   # preset -> tool dependency -> remove -> restore
 npm run example:branch   # branch -> implicit join / skipped / ambiguity
 npm run example:composite # subgraph + foreach + loop + checkpoint
+npm run harness          # real Qwen + local ComfyUI image pipeline
 npm run build
 ```
 
@@ -214,6 +269,8 @@ dist/
 ## Documentation
 
 - [architecture.md](./architecture.md): architecture, providers, MCP, attachments, build and tests
+- [harness.md](./harness.md): Harness goals, use cases, current capabilities, gaps and roadmap
+- [todo.md](./todo.md): task backlog
 - [README.zh-CN.md](./README.zh-CN.md): Chinese README
 - [LICENSE](./LICENSE): MIT
 

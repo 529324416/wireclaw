@@ -61,6 +61,12 @@ export class ForEachNode extends GraphNode{
                 supportedModes: ["value"],
                 defaultMode: "value",
             },
+            {
+                name: "attachments",
+                type: "attachments",
+                supportedModes: ["value"],
+                defaultMode: "value",
+            },
         ];
     }
 
@@ -89,6 +95,9 @@ export class ForEachNode extends GraphNode{
 
         const resultPort = readOptionalString(config, "resultPort", this.type) ?? "text";
         const results: JsonValue[] = [];
+        type AttachmentValue = Extract<HarnessValue, { type: "attachments" }>;
+        const attachments: AttachmentValue["attachments"][number][] = [];
+        const seenAttachments = new Set<string>();
 
         for (const [index, item] of items.value.entries()){
             ctx.publish(`forEach.${this.id}.iteration`, {
@@ -136,11 +145,21 @@ export class ForEachNode extends GraphNode{
 
             const output: HarnessValue | undefined = result.outputs[resultPort];
             results.push(output === undefined ? null : harnessValueToJson(output));
+
+            const iterationAttachments = result.outputs.attachments;
+            if (iterationAttachments?.type === "attachments"){
+                for (const attachment of iterationAttachments.attachments){
+                    if (seenAttachments.has(attachment.contentHash)) continue;
+                    seenAttachments.add(attachment.contentHash);
+                    attachments.push(attachment);
+                }
+            }
         }
 
         return {
             results: { type: "json", value: results },
             count: { type: "json", value: results.length },
+            attachments: { type: "attachments", attachments },
         };
     }
 }

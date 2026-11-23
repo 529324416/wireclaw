@@ -73,10 +73,10 @@ try {
         console.error(`[example] bundle failed: ${bundle.error?.message ?? `exit ${String(bundle.status)}`}`);
         process.exitCode = 1;
     } else {
-        const run = spawnSync(process.execPath, [bundlePath], {
+        const run = spawnSync(process.execPath, [bundlePath, ...process.argv.slice(3)], {
             cwd: repoRoot,
             stdio: "inherit",
-            timeout: 120_000,
+            timeout: Number(process.env.EXAMPLE_TIMEOUT_MS ?? 600_000),
         });
 
         if (run.error !== undefined || run.status !== 0) {

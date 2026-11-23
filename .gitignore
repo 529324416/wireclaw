@@ -29,6 +29,8 @@ yarn-error.log*
 
 # 本地实机测试输出
 /.minimax-test-output/
+/harness-output/
+/comic-output/
 
 # 本地 API key / 环境变量
 /ds-apikey.txt

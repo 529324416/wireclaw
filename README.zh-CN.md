@@ -187,6 +187,33 @@ await session.run("只读查询", {
 
 `readonly` / `approval` / `full` 的完整语义见 [architecture.md](./architecture.md)。
 
+## 真实流水线门面
+
+根目录 [`harness.ts`](./harness.ts) 是 harness 设计器的可运行门面：
+
+```text
+主题 → Qwen 生成英文生图提示词 → B 节点调用本地 ComfyUI 生图 → Qwen-VL 生成中文说明
+```
+
+```bash
+npm run harness
+npm run harness -- "自定义主题"
+```
+
+依赖本地 ComfyUI（`http://127.0.0.1:8188`）与 `apikey-qwen.txt`。生成图片和说明写入
+`harness-output/`（已忽略提交）。
+
+### 四格漫画流水线
+
+```bash
+npm run comic
+npm run comic -- "一只小机器人在屋顶照顾最后一株向日葵"
+```
+
+流程：Qwen 规划四格 → 每格用 LoopNode 执行“生成 → Qwen-VL 审查 → 失败带反馈重做”，
+最多 3 次 → ForEach 聚合四张图 → ffmpeg 合成 2×2 漫画。生成物写入 `comic-output/`。
+若某格用尽重试仍不合格，会照样输出合图，但进程以非零退出并报告该格。
+
 ## 开发
 
 ```bash
@@ -210,6 +237,8 @@ dist/
 ## 文档
 
 - [architecture.md](./architecture.md)：架构、Provider、MCP、附件系统、构建与测试
+- [harness.md](./harness.md)：Harness 目标、用例、现状、不足与路线图
+- [todo.md](./todo.md)：任务清单
 - [LICENSE](./LICENSE)：MIT
 
 ## License

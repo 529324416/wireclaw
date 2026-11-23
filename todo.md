@@ -151,6 +151,56 @@ MCP 并不只是「跨进程提供工具」：
 - [ ] 补充实机测试：TTL 过期重传、跨 Provider 附件、并发上传、浏览器宿主
 
 
+## Harness 模块
+
+目标：把 Harness 做成 TS-first、可序列化、可校验、可暂停恢复、可被 GraphEditor 读取的可执行图运行时；JSON 只用于序列化，不作为运行时对象模型。
+
+详细目标、用例、现状与路线图见 [harness.md](./harness.md)。
+
+### 已完成
+
+- [x] `Node` / `Edge` / `Event` / `Graph` / `Graph.run()` 对象模型
+- [x] typed ports 与 `HarnessValue`（text / json / model / toolset / attachment / attachments）
+- [x] Graph JSON 序列化、反序列化、校验、presets、editor catalog
+- [x] A 类单模型调用、B 类 Session/AgentLoop 调用、ToolSet 与工具审批
+- [x] Branch / Choice / 隐式 exclusive join / skipped / fan-in
+- [x] stream 输出、EventTrigger、节点级/图级 ToolSet
+- [x] SubgraphNode、ForEach、Loop、pause / resume / checkpoint
+- [x] B 节点从工具消息收集媒体附件；Loop/ForEach 携带/聚合附件
+- [x] 真实 Qwen + ComfyUI 门面、四格漫画审查/重试案例
+- [x] 离线机械测试 64 项通过
+
+### 后续
+
+#### Cycle D：资产与契约（优先）
+
+- [ ] D1 `ValueBundle` / 通用节点状态：Loop、ForEach、Subgraph 不只传 JSON，可携带 text/json/attachments 与命名角色
+- [ ] D1 `ReferenceSet` / `ProjectContext`：角色定稿、风格参考、场景参考成为一等资产，并可自动注入每轮/每格
+- [ ] D1 附件角色/标签/lineage：不只 contentHash，能追踪“这张图是角色定稿/第 2 格候选/审查图”
+- [ ] D2 `RunTrace` / `Attempt` / `Artifact`：树形 run、iteration、attempt、tool job id、输入输出、审查结果
+- [ ] D2 best-of-N / candidate set / selection：多候选、评分、按 panelId 选优或局部重做
+- [ ] D3 Subgraph 显式端口映射与契约：不再固定 text/attachments/json
+- [ ] D3 嵌套图递归校验、requirements 传播、递归深度保护
+- [ ] D3 checkpoint 保存 graph content hash / node type version，避免图已改仍恢复
+- [ ] D3 graph registry / 模板引用，避免到处复制内嵌 GraphDocument
+
+#### Cycle E：可靠性与长任务
+
+- [ ] E1 节点级 retry / fallback / error port / 局部失败结果
+- [ ] E1 ForEach 并发、限流、fail-fast / collect-errors / partial-result
+- [ ] E1 图级 deadline、cost/token/tool-call budget、幂等键
+- [ ] E2 异步 ToolJob：submit -> jobId -> poll -> artifact；checkpoint 保存 jobId
+- [ ] E2 长任务进度、取消、进程重启后的 resume；为视频生成准备
+- [ ] E3 图级 HumanGate：暂停、展示候选、人工选择、继续
+- [ ] E3 checkpoint 持久化存储与 stream 通道重放
+
+#### Cycle F：设计器
+
+- [ ] 节点 `configSchema` / 端口文档 / 必填能力 / 成本提示
+- [ ] Graph dry-run + mock host/tool，先验证再消耗真实 API/GPU
+- [ ] Graph 存储、版本、模板库、导入导出
+- [ ] 四格漫画/视频流水线的可视化可观测面板
+
 ## 开发者反馈记录
 
 - 结果体量上限应放在工具契约层统一处理，而不是每个 MCP Server 单独配置。
