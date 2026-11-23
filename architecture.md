@@ -857,9 +857,9 @@ await registry.closeAll();
 - stdio 传输由 `src/client` 提供，已通过实机联调（Python 子进程）。
 - 更多待办见根目录 `todo.md`。
 
-## Harness Graph（Step 1–3 + A1–A3 + B1–B3 + C1/C2：对象模型、运行时与预设）
+## Harness Graph（Step 1–3 + A1–A3 + B1–B3 + C1–C3：对象模型、运行时与预设）
 
-当前状态：Graph 对象模型、校验、JSON 序列化、运行时、ToolSet、流式端口、EventTrigger、节点预设、依赖校验、预设导入导出/迁移、GraphEditor 节点目录、调度级分支、隐式 exclusive join、fan-in、SubgraphNode、ForEach / Loop，以及内建 input / output / constant / value / model / model.call / agent.run / toolset / choice / branch / merge / subgraph / foreach / loop / eventTrigger / log 节点已实现；外部暂停/恢复尚未实现。
+当前状态：Graph 对象模型、校验、JSON 序列化、运行时、ToolSet、流式端口、EventTrigger、节点预设、依赖校验、预设导入导出/迁移、GraphEditor 节点目录、调度级分支、隐式 exclusive join、fan-in、SubgraphNode、ForEach / Loop、暂停/恢复与 checkpoint，以及内建 input / output / constant / value / model / model.call / agent.run / toolset / choice / branch / merge / subgraph / foreach / loop / eventTrigger / log 节点已实现。
 
 ```text
 src/harness/
@@ -920,6 +920,7 @@ src/harness/
 - **core.value**：从 `GraphRunInput.values` 读取命名值，供子图、ForEach、Loop 和宿主参数复用；`required` 默认 true。
 - **ForEachNode（C2）**：输入 `items` JSON 数组，逐项运行内嵌子图；内层通过 `core.value` 读取 `item` / `iteration`。按顺序收集 `resultPort`（默认 text）到 `results` JSON 数组，并输出 `count`；每轮发出 `forEach.<nodeId>.iteration` 事件；当前串行执行，支持外层取消。
 - **LoopNode（C2）**：输入 `initial`，按 `config.maxIterations` 有界运行内嵌子图；内层通过 `core.value` 读取 `state` / `iteration`，`core.output.json` 约定为 `{ state, done? }`，`done === true` 提前结束。输出最终 `value` 和 `iterations`；每轮发出 `loop.<nodeId>.iteration` 事件；当前状态只支持 JSON，串行执行。
+- **暂停 / 恢复 / checkpoint（C3）**：`GraphRun.pause()` 停止调度新节点、等待当前活跃节点收尾，返回可 JSON 序列化的 `GraphCheckpoint`；`run.resume()` 在同一 run 继续，`Graph.resume(checkpoint, { host })` 从快照创建新 run。checkpoint 保存已完成输出、运行记录、edge 状态、pending 与 ready 列表，因此恢复时不会重跑已完成节点。暂停/恢复发出 `run:paused` / `run:resumed` 事件；`graphId` 不匹配或结构非法时报 `InvalidCheckpoint`。
 - **Fan-in**：`multiple` value 输入必须声明为 `json` / `any`，运行时把所有非 skipped 上游聚合为 JSON 数组；`multiple` stream 输入按 `join: "all"` 汇合多个通道。
 - **Skipped 传播**：调度器按 value 边逐一记录 `value` / `skipped`；required 输入来自 skipped 分支或全部 connected 输入都 skipped 时，节点 skipped；`node:skipped` 事件与记录状态可被 UI 展示。
 - **事件**：run/node 生命周期事件自动发出；`ctx.emit` 推流，`ctx.publish` 发 `custom` 事件；外部通过 `Graph.run({ listener })` 消费。
@@ -983,7 +984,20 @@ npm run example:branch
 - 两个并发来源直接进入同一输入时，以 `AmbiguousJoin` 失败；
 - 显式 MergeNode 仍作为对照路径可用。
 
-尚未实现：基于 `exclusiveGroup` 的静态互斥证明（当前主要靠运行时 exclusive 检查）、图级暂停/恢复/checkpoint、stream join 的 `zip` / `combineLatest` 策略、流背压/限流、节点级 ToolSet 与依赖的启动前联合校验、Subgraph/ForEach/Loop 递归深度保护、ForEach 并发执行、非 JSON Loop 状态、GraphEditor UI 本身。
+Landing C 组合案例：
+
+```bash
+npm run example:composite
+```
+
+- `examples/harness/composite.ts` 包含四个阶段：
+  - Subgraph：外层 input -> 内嵌上层转换图 -> 外层 text；
+  - ForEach：JSON 数组逐项运行内嵌子图，收集 results；
+  - Loop：maxIterations 内递增状态，内层 `done` 提前结束；
+  - Checkpoint：两个延迟节点之间 pause，打印 checkpoint 记录，resume 后完成。
+- 该案例离线运行，不依赖 Provider / 外部服务。
+
+尚未实现：基于 `exclusiveGroup` 的静态互斥证明（当前主要靠运行时 exclusive 检查）、stream join 的 `zip` / `combineLatest` 策略、流背压/限流、节点级 ToolSet 与依赖的启动前联合校验、Subgraph/ForEach/Loop 递归深度保护、ForEach 并发执行、非 JSON Loop 状态、checkpoint 持久化存储与流通道重放、GraphEditor UI 本身。
 
 ## ComfyUI Qwen-Image Tool
 

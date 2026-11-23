@@ -1,6 +1,6 @@
 import { uniqueId } from "../../base";
 import { HarnessError, HarnessErrorCode } from "../base/error";
-import { isRecord } from "../base/utils";
+import { cloneJson, isRecord } from "../base/utils";
 import { HarnessBuiltinNodeType } from "../definition";
 import type { Edge } from "../graph/edge";
 import type { GraphEvent, GraphEventListener, GraphRunStatus } from "../graph/event";
@@ -18,6 +18,7 @@ import type {
 } from "../graph/type";
 import { OutputChannel } from "./channel";
 import type {
+    GraphCheckpoint,
     GraphHost,
     GraphRunInput,
     GraphRunOptions,
@@ -71,12 +72,32 @@ export class GraphRun{
     private _outputNode?: GraphNode;
     private _sequence = 0;
 
+    private _pauseRequested = false;
+    private _pausePromise?: Promise<GraphCheckpoint>;
+    private _pauseResolve?: (checkpoint: GraphCheckpoint) => void;
+    private _pauseReject?: (error: unknown) => void;
+    private _resumeWait?: () => void;
+    private _lastCheckpoint?: GraphCheckpoint;
+    private readonly _checkpoint?: GraphCheckpoint;
+    private _restored = false;
+
     constructor(graph: Graph, options: GraphRunOptions){
+        if (options.checkpoint !== undefined){
+            validateCheckpointShape(options.checkpoint);
+            if (options.checkpoint.graphId !== graph.id){
+                throw new HarnessError(
+                    HarnessErrorCode.InvalidCheckpoint,
+                    `Checkpoint graphId "${options.checkpoint.graphId}" does not match "${graph.id}"`,
+                );
+            }
+        }
+
         this._graph = graph;
         this._host = options.host;
-        this._input = options.input ?? {};
+        this._checkpoint = options.checkpoint;
+        this._input = options.checkpoint?.input ?? options.input ?? {};
         this._maxConcurrency = normalizeConcurrency(options.maxConcurrency);
-        this.id = `run-${uniqueId()}`;
+        this.id = options.checkpoint?.runId ?? `run-${uniqueId()}`;
         this.done = new Promise<GraphRunResult>((resolve) => {
             this._resolveDone = resolve;
         });
@@ -101,6 +122,10 @@ export class GraphRun{
         return this._result;
     }
 
+    get checkpoint(): GraphCheckpoint | undefined{
+        return this._lastCheckpoint;
+    }
+
     onEvent(listener: GraphEventListener): () => void{
         this._listeners.add(listener);
         return () => {
@@ -108,11 +133,66 @@ export class GraphRun{
         };
     }
 
+    /** 请求暂停；等当前活跃节点结束后返回 checkpoint */
+    pause(): Promise<GraphCheckpoint>{
+        if (this._status === "paused" && this._lastCheckpoint !== undefined){
+            return Promise.resolve(this._lastCheckpoint);
+        }
+        if (this._status !== "running"){
+            return Promise.reject(new HarnessError(
+                HarnessErrorCode.InvalidRequest,
+                `Cannot pause a run in status "${this._status}"`,
+            ));
+        }
+        if (this._pausePromise !== undefined) return this._pausePromise;
+
+        this._pauseRequested = true;
+        this._pausePromise = new Promise<GraphCheckpoint>((resolve, reject) =>{
+            this._pauseResolve = resolve;
+            this._pauseReject = reject;
+        });
+        return this._pausePromise;
+    }
+
+    /** 恢复暂停中的 run；返回 false 表示当前不是 paused */
+    resume(): boolean{
+        if (this._status !== "paused") return false;
+
+        this._status = "running";
+        this._pauseRequested = false;
+        this._emit({
+            type: "run:resumed",
+            runId: this.id,
+            at: Date.now(),
+        });
+        const wake = this._resumeWait;
+        this._resumeWait = undefined;
+        wake?.();
+        return true;
+    }
+
     cancel(): void{
-        if (this._status !== "running" || this._cancelRequested) return;
+        if ((this._status !== "running" && this._status !== "paused")
+            || this._cancelRequested){
+            return;
+        }
+
         this._cancelRequested = true;
         this._abort.abort();
         this._closeAllChannels();
+
+        const reject = this._pauseReject;
+        this._pauseReject = undefined;
+        this._pauseResolve = undefined;
+        this._pausePromise = undefined;
+        reject?.(new HarnessError(
+            HarnessErrorCode.InvalidRequest,
+            "Run was cancelled before it could pause",
+        ));
+
+        const wake = this._resumeWait;
+        this._resumeWait = undefined;
+        wake?.();
     }
 
     start(): void{
@@ -145,7 +225,34 @@ export class GraphRun{
             this._outputNode = this._selectOutputNode();
             await this._validateRequirements();
             this._prepareExecution();
-            await this._execute();
+            if (this._checkpoint !== undefined){
+                this._restoreCheckpoint(this._checkpoint);
+            }
+
+            while (true){
+                const outcome = await this._execute();
+                if (outcome !== "paused") break;
+
+                const checkpoint = this._createCheckpoint();
+                this._lastCheckpoint = checkpoint;
+                this._status = "paused";
+                this._emit({
+                    type: "run:paused",
+                    runId: this.id,
+                    at: Date.now(),
+                });
+
+                const resolve = this._pauseResolve;
+                this._pauseResolve = undefined;
+                this._pauseReject = undefined;
+                this._pausePromise = undefined;
+                resolve?.(checkpoint);
+
+                await new Promise<void>((resolveWait) =>{
+                    this._resumeWait = resolveWait;
+                });
+                this._resumeWait = undefined;
+            }
         }catch(error){
             this._failure = error;
             this._abort.abort();
@@ -297,7 +404,7 @@ export class GraphRun{
         }
     }
 
-    private async _execute(): Promise<void>{
+    private async _execute(): Promise<"done" | "paused">{
         const active = new Set<Promise<void>>();
         const hasStreamConsumer = this._graph.nodes.some((node) =>
             node.inputs.some((port) => port.mode === "stream"));
@@ -314,7 +421,9 @@ export class GraphRun{
             active.add(promise);
         };
 
-        while (this._failure === undefined && !this._abort.signal.aborted){
+        while (this._failure === undefined
+            && !this._abort.signal.aborted
+            && !this._pauseRequested){
             while (this._ready.length > 0 && active.size < concurrency){
                 const nodeId = this._ready.shift();
                 if (nodeId !== undefined) launch(nodeId);
@@ -324,11 +433,17 @@ export class GraphRun{
             await Promise.race(active);
         }
 
-        // 失败/取消后等待已经启动的节点收尾，保证 records 完整
-        this._closeAllChannels();
+        const paused = this._pauseRequested
+            && this._failure === undefined
+            && !this._abort.signal.aborted;
+
+        // 暂停时保留未启动节点的通道；失败/取消/完成时统一关闭
+        if (!paused) this._closeAllChannels();
         while (active.size > 0){
             await Promise.race(active);
         }
+
+        return paused ? "paused" : "done";
     }
 
     private async _executeNode(nodeId: string): Promise<void>{
@@ -741,6 +856,52 @@ export class GraphRun{
         }
     }
 
+    private _createCheckpoint(): GraphCheckpoint{
+        return cloneJson<GraphCheckpoint>({
+            version: 1,
+            runId: this.id,
+            graphId: this._graph.id,
+            input: this._input,
+            outputs: Object.fromEntries(this._outputs),
+            records: [...this._records],
+            edgeStates: Object.fromEntries(this._edgeStates),
+            pending: Object.fromEntries(this._pending),
+            ready: [...this._ready],
+        });
+    }
+
+    private _restoreCheckpoint(checkpoint: GraphCheckpoint): void{
+        if (this._restored) return;
+        this._restored = true;
+
+        this._outputs.clear();
+        for (const [nodeId, outputs] of Object.entries(checkpoint.outputs)){
+            this._outputs.set(nodeId, outputs);
+        }
+
+        this._records.length = 0;
+        this._records.push(...checkpoint.records);
+
+        this._edgeStates.clear();
+        for (const [key, state] of Object.entries(checkpoint.edgeStates)){
+            this._edgeStates.set(key, state);
+        }
+
+        this._pending.clear();
+        for (const [nodeId, count] of Object.entries(checkpoint.pending)){
+            this._pending.set(nodeId, count);
+        }
+
+        this._ready.length = 0;
+        this._ready.push(...checkpoint.ready);
+
+        for (const record of checkpoint.records){
+            if (record.status === "completed" || record.status === "skipped"){
+                this._closeNodeChannels(record.nodeId);
+            }
+        }
+    }
+
     private _finish(): void{
         const status: GraphRunStatus = this._failure !== undefined
             ? "failed"
@@ -751,6 +912,15 @@ export class GraphRun{
             ? {}
             : this._outputs.get(this._outputNode.id) ?? {};
         const endedAt = Date.now();
+
+        const rejectPause = this._pauseReject;
+        this._pauseReject = undefined;
+        this._pauseResolve = undefined;
+        this._pausePromise = undefined;
+        rejectPause?.(new HarnessError(
+            HarnessErrorCode.InvalidRequest,
+            "Run finished before it could pause",
+        ));
 
         const result: GraphRunResult = {
             runId: this.id,
@@ -782,6 +952,47 @@ export class GraphRun{
                 // listener 异常不能破坏 GraphRun
             }
         }
+    }
+}
+
+function validateCheckpointShape(value: GraphCheckpoint): void{
+    if (!isRecord(value)
+        || value.version !== 1
+        || typeof value.runId !== "string"
+        || typeof value.graphId !== "string"
+        || !isRecord(value.input)
+        || !isRecord(value.outputs)
+        || !Array.isArray(value.records)
+        || !isRecord(value.edgeStates)
+        || !isRecord(value.pending)
+        || !Array.isArray(value.ready)){
+        throw new HarnessError(
+            HarnessErrorCode.InvalidCheckpoint,
+            "Invalid graph checkpoint shape",
+        );
+    }
+
+    for (const state of Object.values(value.edgeStates)){
+        if (state !== "value" && state !== "skipped"){
+            throw new HarnessError(
+                HarnessErrorCode.InvalidCheckpoint,
+                "Invalid checkpoint edge state",
+            );
+        }
+    }
+    for (const count of Object.values(value.pending)){
+        if (typeof count !== "number" || !Number.isInteger(count) || count < 0){
+            throw new HarnessError(
+                HarnessErrorCode.InvalidCheckpoint,
+                "Invalid checkpoint pending count",
+            );
+        }
+    }
+    if (value.ready.some((nodeId) => typeof nodeId !== "string")){
+        throw new HarnessError(
+            HarnessErrorCode.InvalidCheckpoint,
+            "Invalid checkpoint ready list",
+        );
     }
 }
 

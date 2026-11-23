@@ -29,6 +29,7 @@ export const HarnessErrorCode = {
     MissingProviderDependency: "missing_provider_dependency",
     MissingModelDependency: "missing_model_dependency",
     MissingParameterDependency: "missing_parameter_dependency",
+    InvalidCheckpoint: "invalid_checkpoint",
     InvalidDocument: "invalid_document",
     UnsupportedDocumentVersion: "unsupported_document_version",
     SerializationFailed: "serialization_failed",

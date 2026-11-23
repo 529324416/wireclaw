@@ -32,6 +32,8 @@ assert.equal("SubgraphNode" in root, true);
 assert.equal("ForEachNode" in root, true);
 assert.equal("LoopNode" in root, true);
 assert.equal("ValueNode" in root, true);
+assert.equal(typeof root.Graph.prototype.resume, "function");
+assert.equal(typeof root.GraphRun.prototype.pause, "function");
 assert.equal("LocalToolProvider" in root, false, "core must not expose local tools");
 assert.equal("McpStdioTransport" in root, false, "core must not expose stdio transport");
 

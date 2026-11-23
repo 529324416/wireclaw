@@ -56,6 +56,22 @@ export type GraphRunOptions = {
     listener?: GraphEventListener;
     signal?: AbortSignal;
     maxConcurrency?: number;
+
+    /** 从暂停点恢复；恢复时 input 以 checkpoint 为准 */
+    checkpoint?: GraphCheckpoint;
+};
+
+/** 可序列化的暂停快照；恢复时仍需要原 Graph 定义 */
+export type GraphCheckpoint = {
+    version: 1;
+    runId: string;
+    graphId: string;
+    input: GraphRunInput;
+    outputs: Record<string, NodeOutputValues>;
+    records: NodeRunRecord[];
+    edgeStates: Record<string, "value" | "skipped">;
+    pending: Record<string, number>;
+    ready: string[];
 };
 
 export type NodeRunRecordStatus = "completed" | "failed" | "cancelled" | "skipped";

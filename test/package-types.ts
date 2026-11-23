@@ -13,6 +13,7 @@ import {
     serializeNodePreset,
 } from "wireclaw";
 import type {
+    GraphCheckpoint,
     GraphDocument,
     GraphEditorCatalog,
     GraphHost,
@@ -41,6 +42,7 @@ void createEditorCatalog;
 void createNewSession;
 void instantiateNodePreset;
 void serializeNodePreset;
+void (null as unknown as GraphCheckpoint);
 void (null as unknown as GraphDocument);
 void (null as unknown as GraphEditorCatalog);
 void (null as unknown as GraphHost);

@@ -197,6 +197,7 @@ npm run test:live        # live scripts; needs local services or API keys
 npm run example:harness  # minimal runnable Harness graph (no provider needed)
 npm run example:preset   # preset -> tool dependency -> remove -> restore
 npm run example:branch   # branch -> implicit join / skipped / ambiguity
+npm run example:composite # subgraph + foreach + loop + checkpoint
 npm run build
 ```
 

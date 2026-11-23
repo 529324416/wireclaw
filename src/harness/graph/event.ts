@@ -64,6 +64,16 @@ export type GraphEvent =
         at: number;
     }
     | {
+        type: "run:paused";
+        runId: string;
+        at: number;
+    }
+    | {
+        type: "run:resumed";
+        runId: string;
+        at: number;
+    }
+    | {
         type: "run:end";
         runId: string;
         status: GraphRunStatus;
