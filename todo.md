@@ -155,7 +155,7 @@ MCP 并不只是「跨进程提供工具」：
 
 目标：把 Harness 做成 TS-first、可序列化、可校验、可暂停恢复、可被 GraphEditor 读取的可执行图运行时；JSON 只用于序列化，不作为运行时对象模型。
 
-详细目标、用例、现状与路线图见 [harness.md](./harness.md)。
+详细目标、用例、现状与路线图见 [architecture/harness/README.md](./architecture/harness/README.md)。
 
 ### 已完成
 

@@ -6,7 +6,7 @@ Wireclaw 是一个可嵌入的 AI Harness 模块。
 
 它把「对话循环、工具调用、审批与权限、附件管理、会话序列化、多 Provider 适配」这些流程收敛成可组装的 `Session`；LLM、工具、附件存储等具体实现由宿主提供。
 
-> 详细架构、Provider/MCP/附件实现、构建与测试说明见 [architecture.md](./architecture.md)。
+> 详细架构、Provider/MCP/附件实现、构建与测试说明见 [architecture/](./architecture/README.md)。
 
 ## 状态
 
@@ -185,7 +185,7 @@ await session.run("只读查询", {
 });
 ```
 
-`readonly` / `approval` / `full` 的完整语义见 [architecture.md](./architecture.md)。
+`readonly` / `approval` / `full` 的完整语义见 [architecture/tools-mcp.md](./architecture/tools-mcp.md)。
 
 ## 真实流水线门面
 
@@ -236,8 +236,8 @@ dist/
 
 ## 文档
 
-- [architecture.md](./architecture.md)：架构、Provider、MCP、附件系统、构建与测试
-- [harness.md](./harness.md)：Harness 目标、用例、现状、不足与路线图
+- [architecture/](./architecture/README.md)：按模块拆分的架构、Provider、MCP、附件系统、Harness、构建与测试
+- [architecture/harness/README.md](./architecture/harness/README.md)：Harness 目标、用例、现状、不足与路线图
 - [todo.md](./todo.md)：任务清单
 - [LICENSE](./LICENSE)：MIT
 
@@ -245,4 +245,4 @@ dist/
 
 MIT © 2026 biscuit
 
-<!-- 维护提示：README 保持为简介 + 基础用法；实现细节请写入 architecture.md。 -->
+<!-- 维护提示：README 保持为简介 + 基础用法；实现细节请写入 architecture/。 -->

@@ -1,7 +1,13 @@
 # Wireclaw Harness
 
 > 本文描述 Harness 模块的目标、用例、当前能力、已知不足与后续路线。
-> 任务拆解见 [todo.md](./todo.md)，整体架构见 [architecture.md](./architecture.md)。
+> 任务拆解见 [todo.md](../../todo.md)，整体架构见 [architecture/README.md](../README.md)。
+
+相关模块文档：
+
+- [Runtime](./runtime.md)
+- [Presets](./presets.md)
+- [Examples](./examples.md)
 
 ---
 
@@ -62,7 +68,7 @@ Harness 是 wireclaw 的 **TS-first 可执行图运行时**，也是 Harness Des
   → Output 输出文本 + 图片附件
 ```
 
-实现：根目录 [harness.ts](./harness.ts)  
+实现：根目录 [harness.ts](../../harness.ts)  
 命令：`npm run harness`
 
 ### 3.2 四格漫画 + 审查重试
@@ -80,7 +86,7 @@ Harness 是 wireclaw 的 **TS-first 可执行图运行时**，也是 Harness Des
   → ffmpeg 合成 2×2
 ```
 
-实现：根目录 [harness-comic.ts](./harness-comic.ts)  
+实现：根目录 [harness-comic.ts](../../harness-comic.ts)  
 命令：`npm run comic`
 
 这个用例暴露了一个重要边界：

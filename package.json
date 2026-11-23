@@ -42,6 +42,7 @@
   "files": [
     "dist",
     "architecture.md",
+    "architecture/",
     "README.zh-CN.md"
   ],
   "engines": {

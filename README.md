@@ -6,7 +6,7 @@ Wireclaw is an embeddable AI harness module.
 
 It turns the conversation loop, tool calling, approval and permissions, attachment management, session serialization, and multi-provider adaptation into a composable `Session`. The host supplies the concrete LLM, tools, and attachment storage.
 
-> Architecture, provider, MCP, attachment internals, build, and test details: [architecture.md](./architecture.md) (currently in Chinese).
+> Architecture, provider, MCP, attachment internals, build, and test details: [architecture/](./architecture/README.md) (currently in Chinese).
 
 ## Status
 
@@ -185,7 +185,7 @@ await session.run("Read-only query", {
 });
 ```
 
-See [architecture.md](./architecture.md) for the full semantics of `readonly` / `approval` / `full`.
+See [architecture/tools-mcp.md](./architecture/tools-mcp.md) for the full semantics of `readonly` / `approval` / `full`.
 
 ## Real local pipeline facade
 
@@ -268,8 +268,8 @@ dist/
 
 ## Documentation
 
-- [architecture.md](./architecture.md): architecture, providers, MCP, attachments, build and tests
-- [harness.md](./harness.md): Harness goals, use cases, current capabilities, gaps and roadmap
+- [architecture/](./architecture/README.md): module-split architecture, providers, MCP, attachments, Harness, build and tests
+- [architecture/harness/README.md](./architecture/harness/README.md): Harness goals, use cases, current capabilities, gaps and roadmap
 - [todo.md](./todo.md): task backlog
 - [README.zh-CN.md](./README.zh-CN.md): Chinese README
 - [LICENSE](./LICENSE): MIT
@@ -278,4 +278,4 @@ dist/
 
 MIT © 2026 biscuit
 
-<!-- Maintenance note: keep README focused on the introduction and basic usage; put implementation details in architecture.md. -->
+<!-- Maintenance note: keep README focused on the introduction and basic usage; put implementation details in architecture/. -->
