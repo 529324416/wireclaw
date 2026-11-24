@@ -196,7 +196,8 @@ MCP 并不只是「跨进程提供工具」：
 
 #### Cycle F：设计器
 
-- [ ] 节点 `configSchema` / 端口文档 / 必填能力 / 成本提示
+- [x] 节点 `configSchema`（16 个内建节点已填 11 个）
+- [ ] 端口文档 / 必填能力 / 成本提示
 - [ ] Graph dry-run + mock host/tool，先验证再消耗真实 API/GPU
 - [ ] Graph 存储、版本、模板库、导入导出
 - [ ] 四格漫画/视频流水线的可视化可观测面板

@@ -11,7 +11,7 @@ import type {
 import { NodePresetLibrary } from "../preset/library";
 import type { NodePresetDocument } from "../preset/type";
 
-export const GRAPH_EDITOR_CATALOG_VERSION = 1 as const;
+export const GRAPH_EDITOR_CATALOG_VERSION = 2 as const;
 
 /** 单个节点类型的编辑器描述；端口来自一个空的示例实例 */
 export type NodeCatalogEntry = {
@@ -21,6 +21,9 @@ export type NodeCatalogEntry = {
     description?: string;
     builtIn?: boolean;
     configSchema?: JsonObject;
+    defaultConfig?: JsonValue;
+    category?: string;
+    keywords?: readonly string[];
     inputs: readonly InputPortSpec[];
     outputs: readonly OutputPortSpec[];
     requirements: readonly NodeRequirement[];
@@ -62,9 +65,17 @@ export function describeNodeType(
         description: definition.description,
         builtIn: definition.builtIn,
         configSchema: definition.configSchema,
+        defaultConfig: definition.defaultConfig === undefined
+            ? undefined
+            : cloneJson(definition.defaultConfig),
+        category: definition.category,
+        keywords: definition.keywords,
         inputs: node.inputs,
         outputs: node.outputs,
-        requirements: node.requirements,
+        requirements: [
+            ...(definition.requirements ?? []),
+            ...node.requirements,
+        ],
     };
 }
 
@@ -88,6 +99,11 @@ export function describeNodeTypes(
                 description: descriptor.description,
                 builtIn: descriptor.builtIn,
                 configSchema: descriptor.configSchema,
+                defaultConfig: descriptor.defaultConfig === undefined
+                    ? undefined
+                    : cloneJson(descriptor.defaultConfig),
+                category: descriptor.category,
+                keywords: descriptor.keywords,
                 inputs: [],
                 outputs: [],
                 requirements: descriptor.requirements ?? [],

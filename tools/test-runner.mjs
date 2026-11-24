@@ -49,7 +49,13 @@ const filters = args.filter((arg) => !arg.startsWith("--"));
 
 function resolveEsbuildBinary() {
     const packageName = `@esbuild/${process.platform}-${process.arch}`;
-    const packageJson = require.resolve(`${packageName}/package.json`);
+    // Resolve the platform binary relative to the installed esbuild package:
+    // npm hoists @esbuild/* to the project root, pnpm keeps it under
+    // esbuild/node_modules, so a plain require.resolve from this file fails there.
+    const esbuildDir = path.dirname(require.resolve("esbuild/package.json"));
+    const packageJson = require.resolve(`${packageName}/package.json`, {
+        paths: [esbuildDir],
+    });
     const packageRoot = path.dirname(packageJson);
     const binary = process.platform === "win32"
         ? path.join(packageRoot, "esbuild.exe")

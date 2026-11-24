@@ -233,8 +233,8 @@ Harness 是 wireclaw 的 **TS-first 可执行图运行时**，也是 Harness Des
 
 ### 5.9 设计器体验
 
-- 节点没有 `configSchema`，GraphEditor 无法自动生成表单；
-- catalog 只有端口和 sample，没有必填能力、成本、延迟提示；
+- 节点 `configSchema`（JSON Schema 子集）、默认 config、分类与关键词已补齐，GraphEditor 可自动生成表单；
+- catalog 仍缺必填能力、成本、延迟提示与端口级文档；
 - 没有 graph dry-run / mock host，设计时无法低成本验证；
 - 没有 graph registry / 模板库 / 图版本管理；
 - 根目录门面仍是代码，不是可视化可编辑的 Graph 项目。
@@ -289,7 +289,7 @@ Harness 是 wireclaw 的 **TS-first 可执行图运行时**，也是 Harness Des
 
 ### Cycle F：设计器
 
-- `configSchema` / 端口文档 / 能力与成本提示；
+- `configSchema` / 端口文档 / 能力与成本提示（configSchema、默认 config、分类/关键词已完成）；
 - graph dry-run + mock host/tool；
 - graph 存储、版本、模板库、导入导出；
 - 四格/视频流水线的可视化 trace 与候选选择面板。

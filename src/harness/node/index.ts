@@ -1,5 +1,6 @@
 import { HarnessBuiltinNodeType } from "../definition";
 import { NodeTypeRegistry } from "../graph/registry";
+import type { JsonObject } from "../graph/type";
 import { AgentRunNode } from "./agent-run";
 import { BranchNode } from "./branch";
 import { ChoiceNode } from "./choice";
@@ -35,6 +36,46 @@ export * from "./event-trigger";
 export * from "./log-sink";
 export * from "./helpers";
 
+/**
+ * 内嵌子图的最小可运行模板（Input → Output）。
+ *
+ * 每个 Subgraph / ForEach / Loop 拿到独立副本，避免共享引用被编辑器就地修改。
+ */
+function embeddedGraphTemplate(): JsonObject{
+    return {
+        version: 1,
+        id: "embedded",
+        title: "内嵌子图",
+        nodes: [
+            {
+                id: "input",
+                type: HarnessBuiltinNodeType.Input,
+                typeVersion: 1,
+                ui: { x: 0, y: 0 },
+            },
+            {
+                id: "output",
+                type: HarnessBuiltinNodeType.Output,
+                typeVersion: 1,
+                ui: { x: 320, y: 0 },
+            },
+        ],
+        edges: [
+            {
+                from: { nodeId: "input", port: "text" },
+                to: { nodeId: "output", port: "text" },
+            },
+        ],
+    };
+}
+
+const GRAPH_SCHEMA: JsonObject = {
+    title: "内嵌子图",
+    description: "GraphDocument JSON；编辑内嵌图暂用原始 JSON",
+    type: "object",
+    format: "graph",
+};
+
 /** 注册 Step 2 的内建节点 */
 export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
     registry.register({
@@ -43,6 +84,8 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         title: "Input",
         description: "读取本次 GraphRun 的 text / attachments",
         builtIn: true,
+        category: "io",
+        keywords: ["input", "入口", "输入", "run input"],
         create: (id, config, inputs, ui) => new InputNode(id, config, inputs, ui),
     });
     registry.register({
@@ -51,6 +94,8 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         title: "Output",
         description: "Graph 的最终输出汇点",
         builtIn: true,
+        category: "io",
+        keywords: ["output", "出口", "输出", "result"],
         create: (id, config, inputs, ui) => new OutputNode(id, config, inputs, ui),
     });
     registry.register({
@@ -59,6 +104,21 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         title: "Constant",
         description: "输出一个固定的 HarnessValue",
         builtIn: true,
+        category: "data",
+        keywords: ["constant", "value", "常量", "固定值"],
+        configSchema: {
+            type: "object",
+            properties: {
+                value: {
+                    title: "值",
+                    description: "HarnessValue，例如 { type: \"text\", text: \"hello\" }",
+                    type: "object",
+                    format: "json",
+                },
+            },
+            required: ["value"],
+        },
+        defaultConfig: { value: { type: "text", text: "" } },
         create: (id, config, inputs, ui) => new ConstantNode(id, config, inputs, ui),
     });
     registry.register({
@@ -67,6 +127,25 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         title: "Model",
         description: "声明 providerId + modelId 的模型绑定",
         builtIn: true,
+        category: "model",
+        keywords: ["model", "模型", "绑定", "provider"],
+        configSchema: {
+            type: "object",
+            properties: {
+                providerId: {
+                    title: "Provider ID",
+                    type: "string",
+                    description: "如 deepseek / ollama / qwen",
+                },
+                modelId: {
+                    title: "Model ID",
+                    type: "string",
+                    description: "如 deepseek-chat",
+                },
+            },
+            required: ["providerId", "modelId"],
+        },
+        defaultConfig: { providerId: "", modelId: "" },
         create: (id, config, inputs, ui) => new ModelNode(id, config, inputs, ui),
     });
     registry.register({
@@ -75,6 +154,47 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         title: "Model Call",
         description: "A 类单次模型调用（chat / generate）",
         builtIn: true,
+        category: "model",
+        keywords: ["model call", "chat", "generate", "模型调用", "对话", "生成"],
+        configSchema: {
+            type: "object",
+            properties: {
+                mode: {
+                    title: "模式",
+                    type: "string",
+                    enum: ["chat", "generate"],
+                    enumLabels: ["对话", "生成"],
+                    default: "chat",
+                },
+                system: { title: "System Prompt", type: "string" },
+                think: { title: "启用思考", type: "boolean" },
+                thinkingLv: {
+                    title: "思考强度",
+                    type: ["string", "number"],
+                    description: "字符串或数字，由 Provider 解释",
+                },
+                temperature: {
+                    title: "Temperature",
+                    type: "number",
+                    minimum: 0,
+                    maximum: 2,
+                },
+                modality: {
+                    title: "生成模态",
+                    type: "string",
+                    enum: ["image", "audio", "video"],
+                    enumLabels: ["图像", "音频", "视频"],
+                    default: "image",
+                },
+                parameters: {
+                    title: "生成参数",
+                    type: "object",
+                    format: "json",
+                    description: "透传给 Provider.generate 的任意对象",
+                },
+            },
+        },
+        defaultConfig: { mode: "chat" },
         create: (id, config, inputs, ui) => new ModelCallNode(id, config, inputs, ui),
     });
     registry.register({
@@ -83,6 +203,41 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         title: "Agent Run",
         description: "B 类 Session/AgentLoop 调用",
         builtIn: true,
+        category: "model",
+        keywords: ["agent", "agent run", "代理", "工具循环", "session"],
+        configSchema: {
+            type: "object",
+            properties: {
+                permission: {
+                    title: "权限",
+                    type: "string",
+                    enum: ["readonly", "approval", "full"],
+                    enumLabels: ["只读", "需审批", "完全"],
+                    default: "readonly",
+                },
+                maxSteps: {
+                    title: "最大步数",
+                    type: "integer",
+                    minimum: 1,
+                    default: 8,
+                },
+                system: { title: "System Prompt", type: "string" },
+                hostTools: {
+                    title: "宿主工具",
+                    format: "json",
+                    description: "boolean，或 { askUser, viewMedia }",
+                },
+                think: { title: "启用思考", type: "boolean" },
+                thinkingLv: { title: "思考强度", type: ["string", "number"] },
+                temperature: {
+                    title: "Temperature",
+                    type: "number",
+                    minimum: 0,
+                    maximum: 2,
+                },
+            },
+        },
+        defaultConfig: { permission: "readonly", maxSteps: 8 },
         create: (id, config, inputs, ui) => new AgentRunNode(id, config, inputs, ui),
     });
     registry.register({
@@ -91,6 +246,30 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         title: "ToolSet",
         description: "声明当前节点可访问的工具范围",
         builtIn: true,
+        category: "tool",
+        keywords: ["toolset", "tools", "工具", "工具集", "allowlist"],
+        configSchema: {
+            type: "object",
+            properties: {
+                include: {
+                    title: "包含工具",
+                    type: "array",
+                    items: { type: "string" },
+                    description: "留空表示不限制",
+                },
+                exclude: {
+                    title: "排除工具",
+                    type: "array",
+                    items: { type: "string" },
+                },
+                hostTools: {
+                    title: "宿主工具",
+                    format: "json",
+                    description: "{ askUser, viewMedia }",
+                },
+            },
+        },
+        defaultConfig: { include: [] },
         create: (id, config, inputs, ui) => new ToolSetNode(id, config, inputs, ui),
     });
     registry.register({
@@ -99,6 +278,8 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         title: "Choice",
         description: "按 boolean 条件选择 whenTrue / whenFalse 的值",
         builtIn: true,
+        category: "control",
+        keywords: ["choice", "条件", "三目", "选择"],
         create: (id, config, inputs, ui) => new ChoiceNode(id, config, inputs, ui),
     });
     registry.register({
@@ -107,6 +288,8 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         title: "Branch",
         description: "按 boolean 条件只激活一条分支，未命中分支 skipped",
         builtIn: true,
+        category: "control",
+        keywords: ["branch", "分支", "条件"],
         create: (id, config, inputs, ui) => new BranchNode(id, config, inputs, ui),
     });
     registry.register({
@@ -115,6 +298,8 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         title: "Merge",
         description: "汇合 BranchNode 的可选分支输出",
         builtIn: true,
+        category: "control",
+        keywords: ["merge", "汇合", "合并", "join"],
         create: (id, config, inputs, ui) => new MergeNode(id, config, inputs, ui),
     });
     registry.register({
@@ -123,6 +308,14 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         title: "Subgraph",
         description: "把一张内嵌 Graph 作为节点执行",
         builtIn: true,
+        category: "composite",
+        keywords: ["subgraph", "子图", "内嵌图", "复用"],
+        configSchema: {
+            type: "object",
+            properties: { graph: GRAPH_SCHEMA },
+            required: ["graph"],
+        },
+        defaultConfig: { graph: embeddedGraphTemplate() },
         create: (id, config, inputs, ui) => new SubgraphNode(registry, id, config, inputs, ui),
     });
     registry.register({
@@ -131,6 +324,21 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         title: "Value",
         description: "从 GraphRunInput.values 读取命名值",
         builtIn: true,
+        category: "data",
+        keywords: ["value", "参数", "命名值", "input value"],
+        configSchema: {
+            type: "object",
+            properties: {
+                name: { title: "参数名", type: "string", minLength: 1 },
+                required: {
+                    title: "必填",
+                    type: "boolean",
+                    default: true,
+                },
+            },
+            required: ["name"],
+        },
+        defaultConfig: { name: "value", required: true },
         create: (id, config, inputs, ui) => new ValueNode(id, config, inputs, ui),
     });
     registry.register({
@@ -139,6 +347,22 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         title: "ForEach",
         description: "对 JSON 数组逐项运行内嵌子图",
         builtIn: true,
+        category: "composite",
+        keywords: ["foreach", "遍历", "批量", "数组"],
+        configSchema: {
+            type: "object",
+            properties: {
+                graph: GRAPH_SCHEMA,
+                resultPort: {
+                    title: "结果端口",
+                    type: "string",
+                    default: "text",
+                    description: "内嵌图输出到 results 的端口名",
+                },
+            },
+            required: ["graph"],
+        },
+        defaultConfig: { graph: embeddedGraphTemplate(), resultPort: "text" },
         create: (id, config, inputs, ui) => new ForEachNode(registry, id, config, inputs, ui),
     });
     registry.register({
@@ -147,6 +371,31 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         title: "Loop",
         description: "按 maxIterations 有界运行内嵌子图",
         builtIn: true,
+        category: "composite",
+        keywords: ["loop", "循环", "迭代", "重试"],
+        configSchema: {
+            type: "object",
+            properties: {
+                graph: GRAPH_SCHEMA,
+                maxIterations: {
+                    title: "最大迭代",
+                    type: "integer",
+                    minimum: 1,
+                    default: 3,
+                },
+                retryOnError: {
+                    title: "失败重试",
+                    type: "boolean",
+                    default: false,
+                },
+            },
+            required: ["graph", "maxIterations"],
+        },
+        defaultConfig: {
+            graph: embeddedGraphTemplate(),
+            maxIterations: 3,
+            retryOnError: false,
+        },
         create: (id, config, inputs, ui) => new LoopNode(registry, id, config, inputs, ui),
     });
     registry.register({
@@ -155,6 +404,16 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         title: "Event Trigger",
         description: "把 stream 输入发布为 Graph custom 事件",
         builtIn: true,
+        category: "event",
+        keywords: ["event", "trigger", "事件", "触发", "stream"],
+        configSchema: {
+            type: "object",
+            properties: {
+                event: { title: "事件名", type: "string", minLength: 1 },
+            },
+            required: ["event"],
+        },
+        defaultConfig: { event: "progress" },
         create: (id, config, inputs, ui) => new EventTriggerNode(id, config, inputs, ui),
     });
     registry.register({
@@ -163,6 +422,21 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         title: "Log Sink",
         description: "把 text stream 写入宿主日志",
         builtIn: true,
+        category: "event",
+        keywords: ["log", "日志", "输出", "stream"],
+        configSchema: {
+            type: "object",
+            properties: {
+                level: {
+                    title: "级别",
+                    type: "string",
+                    enum: ["debug", "info", "warn", "error"],
+                    enumLabels: ["debug", "info", "warn", "error"],
+                    default: "info",
+                },
+            },
+        },
+        defaultConfig: { level: "info" },
         create: (id, config, inputs, ui) => new LogSinkNode(id, config, inputs, ui),
     });
 }

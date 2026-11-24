@@ -19,10 +19,11 @@
 - `deserializeNodePreset` 支持 `migrations: NodePresetMigration[]`，按 `fromVersion -> toVersion` 链式迁移；无迁移、迁移结果版本错误或版本高于当前 schema 都会报错。
 - `serializeNodePresetLibrary` / `deserializeNodePresetLibrary`：节点库整体导入导出，库版本为 1；重复 presetId 会拒绝。
 - `createEditorCatalog(registry, { presets?, configs? })` 返回：
-  - `version`
-  - `nodeTypes`：类型、版本、标题、configSchema、输入/输出端口、依赖、可选的创建错误
+  - `version`（当前 2）
+  - `nodeTypes`：类型、版本、标题、configSchema、默认 config、分类、关键词、输入/输出端口、依赖、可选的创建错误
   - `presets`：节点库条目
 - `describeNodeType()` 会用 `catalog:<type>` 空实例来获取端口，因此支持“端口由 config 决定”的节点；`describeNodeTypes()` 会隔离单个坏类型，不让整个目录失败。
+- `configSchema` 使用受支持子集（object / string / number / integer / boolean / array / enum / required / properties / items / default / format 等），由 `validateNodeConfig()` 做基础校验；编辑器可将 `format: "json" | "graph"` 的字段回退到 JSON 文本域。`defaultConfig` 由目录返回深拷贝，供“新建节点”预填。
 - 节点目录只暴露类型与契约，不执行节点；预设列表只暴露节点库条目，不持有 GraphNode 实例。
 
 

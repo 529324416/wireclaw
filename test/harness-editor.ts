@@ -23,7 +23,7 @@ function section(title: string): void{
 
 class DynamicNode extends GraphNode{
 
-    override readonly type = "test.dynamic";
+    override readonly type: string = "test.dynamic";
 
     override get inputs(): readonly InputPortSpec[]{
         const count = typeof this.config === "object"
@@ -50,12 +50,17 @@ class DynamicNode extends GraphNode{
     }
 }
 
+class RequiresNode extends DynamicNode{
+
+    override readonly type = "test.requires";
+}
+
 section("内建节点目录");
 {
     const registry = createBuiltinNodeRegistry();
     const catalog = createEditorCatalog(registry);
 
-    assert.equal(catalog.version, 1);
+    assert.equal(catalog.version, 2);
     assert.equal(catalog.presets.length, 0);
 
     const call = catalog.nodeTypes.find(
@@ -66,6 +71,10 @@ section("内建节点目录");
     assert.ok(call.inputs.some((port) => port.name === "prompt"));
     assert.ok(call.outputs.some((port) => port.name === "text"));
     assert.equal(call.error, undefined);
+    assert.equal(call.category, "model");
+    assert.ok(call.configSchema !== undefined);
+    assert.ok(call.keywords?.includes("模型调用") === true);
+    assert.deepEqual(call.defaultConfig, { mode: "chat" });
 
     const input = catalog.nodeTypes.find(
         (entry) => entry.type === HarnessBuiltinNodeType.Input,
@@ -73,10 +82,22 @@ section("内建节点目录");
     assert.ok(input !== undefined);
     assert.equal(input.inputs.length, 0);
     assert.ok(input.outputs.some((port) => port.name === "text"));
+    assert.equal(input.configSchema, undefined);
+    assert.equal(input.category, "io");
 
     assert.ok(catalog.nodeTypes.some((entry) => entry.type === HarnessBuiltinNodeType.ToolSet));
     assert.ok(catalog.nodeTypes.some((entry) => entry.type === HarnessBuiltinNodeType.EventTrigger));
-    console.log("PASS 内建节点目录包含端口与元信息");
+
+    const withSchema = catalog.nodeTypes.filter((entry) => entry.configSchema !== undefined);
+    assert.equal(withSchema.length, 11);
+    assert.ok(catalog.nodeTypes.every((entry) => entry.category !== undefined));
+    const constant = catalog.nodeTypes.find(
+        (entry) => entry.type === HarnessBuiltinNodeType.Constant,
+    );
+    assert.deepEqual(constant?.defaultConfig, {
+        value: { type: "text", text: "" },
+    });
+    console.log("PASS 内建节点目录包含端口、configSchema、默认 config 与分类");
 }
 
 section("动态端口与错误隔离");
@@ -114,7 +135,19 @@ section("动态端口与错误隔离");
     assert.deepEqual(bad?.inputs, []);
 
     assert.throws(() => describeNodeType(registry, "test.bad"), /cannot create/);
-    console.log("PASS 动态端口按 config 生成，坏类型不阻断整个目录");
+
+    registry.register({
+        type: "test.requires",
+        version: 1,
+        title: "Requires",
+        requirements: [{ kind: "provider", providerId: "deepseek" }],
+        create: (id, config, inputs, ui) => new RequiresNode(id, config, inputs, ui),
+    });
+    const requires = describeNodeType(registry, "test.requires");
+    assert.deepEqual(requires.requirements, [
+        { kind: "provider", providerId: "deepseek" },
+    ]);
+    console.log("PASS 动态端口按 config 生成，坏类型不阻断整个目录，静态依赖不丢失");
 }
 
 section("预设进入编辑器目录");

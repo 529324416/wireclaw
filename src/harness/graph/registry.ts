@@ -17,8 +17,17 @@ export type NodeTypeDefinition = {
     description?: string;
     builtIn?: boolean;
 
-    /** 供设计器生成参数表单的 JSON Schema */
+    /** 供设计器生成参数表单的 JSON Schema（受支持子集见 editor/schema.ts） */
     configSchema?: JsonObject;
+
+    /** 新建节点实例时写入 GraphDocument 的默认 config */
+    defaultConfig?: JsonValue;
+
+    /** 节点库分组 id；编辑器负责映射为显示名 */
+    category?: string;
+
+    /** 节点库搜索关键词（中英文均可） */
+    keywords?: readonly string[];
 
     /** 节点类型的静态外部依赖 */
     requirements?: readonly NodeRequirement[];
@@ -77,6 +86,25 @@ export class NodeTypeRegistry{
             throw new HarnessError(
                 HarnessErrorCode.NodeTypeConflict,
                 `Node type "${definition.type}" has a non-JSON config schema`,
+            );
+        }
+        if (definition.defaultConfig !== undefined && !isJsonSafe(definition.defaultConfig)){
+            throw new HarnessError(
+                HarnessErrorCode.NodeTypeConflict,
+                `Node type "${definition.type}" has a non-JSON default config`,
+            );
+        }
+        if (definition.category !== undefined
+            && (typeof definition.category !== "string" || definition.category.length === 0)){
+            throw new HarnessError(
+                HarnessErrorCode.NodeTypeConflict,
+                `Node type "${definition.type}" has an invalid category`,
+            );
+        }
+        if (definition.keywords !== undefined && !isKeywordList(definition.keywords)){
+            throw new HarnessError(
+                HarnessErrorCode.NodeTypeConflict,
+                `Node type "${definition.type}" has invalid keywords`,
             );
         }
         if (this._types.has(definition.type)){
@@ -178,5 +206,14 @@ function toDescriptor(definition: NodeTypeDefinition): NodeTypeDescriptor{
         description: definition.description,
         builtIn: definition.builtIn,
         configSchema: definition.configSchema,
+        defaultConfig: definition.defaultConfig,
+        category: definition.category,
+        keywords: definition.keywords,
+        requirements: definition.requirements,
     };
+}
+
+function isKeywordList(value: unknown): boolean{
+    return Array.isArray(value)
+        && value.every((item) => typeof item === "string" && item.length > 0);
 }
