@@ -34,6 +34,9 @@ export type GraphValidateOptions = {
     requirements?: RequirementCatalog;
 };
 
+/** 内嵌图递归校验的最大深度，避免异常/自引用文档无限展开 */
+const MAX_EMBEDDED_GRAPH_DEPTH = 8;
+
 export type GraphOptions = {
     id?: string;
     title?: string;
@@ -87,8 +90,71 @@ export class Graph{
         return this.nodes.find((node) => node.id === nodeId);
     }
 
-    /** 返回全部可定位的校验问题；不抛异常，供设计器逐条展示 */
+    /** 返回全部可定位的校验问题（含内嵌子图）；不抛异常，供设计器逐条展示 */
     validate(options: GraphValidateOptions = {}): readonly HarnessIssue[]{
+        return this.collectIssues(options, 0);
+    }
+
+    private collectIssues(
+        options: GraphValidateOptions,
+        depth: number,
+    ): HarnessIssue[]{
+        const issues = this.collectLocalIssues(options);
+
+        for (const node of this.nodes){
+            const embeddedGraphs = node.embeddedGraphs;
+            if (embeddedGraphs.length === 0) continue;
+
+            if (depth >= MAX_EMBEDDED_GRAPH_DEPTH){
+                issues.push({
+                    code: HarnessErrorCode.InvalidGraph,
+                    message: `Embedded graph depth exceeds ${String(MAX_EMBEDDED_GRAPH_DEPTH)} at node "${node.id}"`,
+                    nodeId: node.id,
+                });
+                continue;
+            }
+
+            for (const embedded of embeddedGraphs){
+                if (embedded.graph === undefined){
+                    issues.push({
+                        code: HarnessErrorCode.InvalidGraph,
+                        message: `Embedded graph "${embedded.path}" is invalid: `
+                            + embeddedErrorText(embedded.error),
+                        nodeId: node.id,
+                        graphPath: embedded.path,
+                    });
+                    continue;
+                }
+
+                const childIssues = embedded.graph.collectIssues(options, depth + 1);
+                for (const issue of childIssues){
+                    issues.push({
+                        code: issue.code,
+                        message: issue.message,
+                        nodeId: node.id,
+                        graphPath: issue.graphPath === undefined
+                            ? embedded.path
+                            : `${embedded.path}/${issue.graphPath}`,
+                        ...(issue.nodeId === undefined && issue.nestedNodeId === undefined
+                            ? {}
+                            : { nestedNodeId: issue.nestedNodeId ?? issue.nodeId }),
+                        ...(issue.port === undefined && issue.nestedPort === undefined
+                            ? {}
+                            : { nestedPort: issue.nestedPort ?? issue.port }),
+                        ...(issue.edgeIndex === undefined && issue.nestedEdgeIndex === undefined
+                            ? {}
+                            : {
+                                nestedEdgeIndex: issue.nestedEdgeIndex ?? issue.edgeIndex,
+                            }),
+                    });
+                }
+            }
+        }
+
+        return issues;
+    }
+
+    private collectLocalIssues(options: GraphValidateOptions = {}): HarnessIssue[]{
         const issues: HarnessIssue[] = [];
         const nodeById = new Map<string, GraphNode>();
 
@@ -521,6 +587,12 @@ function findOutputPort(node: GraphNode, name: string): OutputPortSpec | undefin
 
 function portKey(nodeId: string, port: string): string{
     return `${nodeId}\u0000${port}`;
+}
+
+function embeddedErrorText(error: unknown): string{
+    if (error instanceof Error) return error.message;
+    if (typeof error === "string") return error;
+    return "unknown error";
 }
 
 function findCycle(

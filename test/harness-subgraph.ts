@@ -159,8 +159,15 @@ section("Subgraph 配置错误");
 
     assert.equal(result.status, "failed");
     assert.ok(result.error instanceof HarnessError);
-    assert.equal(result.error?.code, HarnessErrorCode.InvalidNode);
-    console.log("PASS 内层 GraphDocument 非法时外层节点失败");
+    // 递归校验在 run 启动前就拦下非法内嵌图，并带回 graphPath。
+    assert.equal(result.error?.code, HarnessErrorCode.InvalidGraph);
+    assert.ok(
+        result.error?.issues?.some(
+            (issue) => issue.graphPath === "subgraph.subgraph",
+        ),
+        "expected the invalid embedded graph to be located",
+    );
+    console.log("PASS 内层 GraphDocument 非法时在启动前失败并定位 graphPath");
 }
 
 section("Subgraph 编辑器目录");

@@ -183,14 +183,13 @@ Harness 是 wireclaw 的 **TS-first 可执行图运行时**，也是 Harness Des
 
 ### 5.3 嵌套图契约与静态校验不足
 
-- `Graph.validate()` 不递归校验 Subgraph/Loop/ForEach 内嵌图；
-- 内层 requirements 不传播到外层；
+- `Graph.validate()` 已递归校验 Subgraph/Loop/ForEach 内嵌图；容器节点通过 `collectRequirements()` 把内层依赖传播到 run 预检与编辑器目录，但序列化不会把内层依赖写进外层文档；
 - Subgraph 只有固定 text/attachments/json 映射，没有显式端口契约；
 - 内嵌 GraphDocument 重复存储，没有 graph registry / version pinning；
 - checkpoint 只校验 graphId，不校验图内容 hash / node type version；
-- 子图递归没有深度保护。
+- 递归深度已有上限（8），但没有跨图引用去重。
 
-**影响**：设计期合法、运行期才失败；恢复时图已变化可能语义不一致。
+**影响**：设计期已能定位内层错误；恢复时图已变化仍可能语义不一致。
 
 ### 5.4 可观测性不足
 
@@ -267,8 +266,8 @@ Harness 是 wireclaw 的 **TS-first 可执行图运行时**，也是 Harness Des
   - 图表/面板可直接消费 trace。
 - **D3 Subgraph 契约与递归校验**
   - 显式端口映射；
-  - 内层 requirements 传播；
-  - 递归校验、递归深度保护；
+  - [x] 内层 requirements 传播（2026-11-25）；
+  - [x] 递归校验、递归深度保护（2026-11-25）；
   - checkpoint graph hash / node type version；
   - graph registry / 模板引用。
 

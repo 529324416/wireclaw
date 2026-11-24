@@ -42,9 +42,18 @@ export type HarnessErrorCode = (typeof HarnessErrorCode)[keyof typeof HarnessErr
 export type HarnessIssue = {
     code: HarnessErrorCode;
     message: string;
+    /** 顶层图中可定位的节点；嵌套问题时指向容器节点 */
     nodeId?: string;
     port?: string;
     edgeIndex?: number;
+    /** 嵌套图路径，例如 `subgraph.<nodeId>`；顶层问题为 undefined */
+    graphPath?: string;
+    /** 嵌套图内的实际节点 id（顶层问题不需要） */
+    nestedNodeId?: string;
+    /** 嵌套图内的边下标（顶层问题不需要） */
+    nestedEdgeIndex?: number;
+    /** 嵌套图内的端口名（顶层问题不需要） */
+    nestedPort?: string;
 };
 
 export type HarnessErrorOptions = {

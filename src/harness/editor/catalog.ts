@@ -74,7 +74,7 @@ export function describeNodeType(
         outputs: node.outputs,
         requirements: [
             ...(definition.requirements ?? []),
-            ...node.requirements,
+            ...node.collectRequirements(),
         ],
     };
 }

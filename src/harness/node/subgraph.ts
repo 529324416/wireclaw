@@ -2,7 +2,7 @@ import { HarnessError, HarnessErrorCode } from "../base/error";
 import { isRecord } from "../base/utils";
 import { HarnessBuiltinNodeType } from "../definition";
 import { GraphNode } from "../graph/node";
-import type { NodeContext } from "../graph/node";
+import type { EmbeddedGraph, NodeContext } from "../graph/node";
 import type { NodeTypeRegistry } from "../graph/registry";
 import type {
     HarnessValue,
@@ -14,6 +14,7 @@ import type {
     OutputPortSpec,
 } from "../graph/type";
 import type { GraphRunResult } from "../runtime/types";
+import { readEmbeddedGraph } from "./embedded-graph";
 import { attachmentRefs, errorText, readConfig } from "./helpers";
 import { runSubgraph } from "./subgraph-runner";
 
@@ -38,6 +39,15 @@ export class SubgraphNode extends GraphNode{
         ui: JsonObject | undefined = undefined,
     ){
         super(id, config, inputDefaults, ui);
+    }
+
+    override get embeddedGraphs(): readonly EmbeddedGraph[]{
+        return [readEmbeddedGraph(
+            this.config,
+            this.type,
+            this._registry,
+            `subgraph.${this.id}`,
+        )];
     }
 
     override get inputs(): readonly InputPortSpec[]{

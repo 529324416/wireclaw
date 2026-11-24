@@ -2,7 +2,7 @@
 
 ## 对象模型与调度
 
-当前状态：Graph 对象模型、校验、JSON 序列化、运行时、ToolSet、流式端口、EventTrigger、节点预设、依赖校验、预设导入导出/迁移、GraphEditor 节点目录、调度级分支、隐式 exclusive join、fan-in、SubgraphNode、ForEach / Loop、暂停/恢复与 checkpoint，以及内建 input / output / constant / value / model / model.call / agent.run / toolset / choice / branch / merge / subgraph / foreach / loop / eventTrigger / log 节点已实现。
+当前状态：Graph 对象模型、校验（含内嵌图递归校验）、JSON 序列化、运行时、ToolSet、流式端口、EventTrigger、节点预设、依赖校验、预设导入导出/迁移、GraphEditor 节点目录、调度级分支、隐式 exclusive join、fan-in、SubgraphNode、ForEach / Loop、暂停/恢复与 checkpoint，以及内建 input / output / constant / value / model / model.call / agent.run / toolset / choice / branch / merge / subgraph / foreach / loop / eventTrigger / log 节点已实现。
 
 ```text
 src/harness/
@@ -42,7 +42,8 @@ src/harness/
 - **端口与值**：端口声明 `PortValueType`（text/json/model/toolset/attachment/attachments/any）；值统一为 `HarnessValue`；媒体只保存 `AttachmentRef.contentHash`。
 - **Value / Stream**：输出端口用 `supportedModes` / `defaultMode` 声明，输入端口用 `mode: "stream"` 声明；节点 `execute` 的 stream 输出通过 `ctx.emit` 推送、value 输出通过返回值。当前 A/B 仍返回最终值，同时推送 token 流；后续可把默认展示切换为纯流式而不改 Graph/Edge 结构。
 - **自定义节点**：宿主用 `NodeTypeRegistry.register({ type, version, create, configSchema? })` 注册；JSON 只保存 `type + typeVersion + config + inputs + ui`，不携带可执行代码；未知类型或版本不匹配会拒绝反序列化。
-- **校验**：节点 ID/端口唯一、边两端节点与端口存在、端口类型兼容、必填输入（边或默认值）、单输入端口默认 exclusive join（允许多边；`join: "error"` 显式拒绝多边；`multiple: true` 聚合）、重复边、环、图级参数/事件声明。
+- **校验**：节点 ID/端口唯一、边两端节点与端口存在、端口类型兼容、必填输入（边或默认值）、单输入端口默认 exclusive join（允许多边；`join: "error"` 显式拒绝多边；`multiple: true` 聚合）、重复边、环、图级参数/事件声明；`Subgraph` / `Loop` / `ForEach` 的 `config.graph` 递归校验（深度上限 8），内层问题回填容器 `nodeId` 与 `graphPath` / `nestedNodeId`，requirements catalog 一并下传到内层。
+- **requirements 传播**：`GraphNode.collectRequirements()` 汇总节点自身与内嵌子图的依赖；容器节点的内层 provider / model / tool / parameter 会在 run 预检与编辑器目录中显现，序列化仍只写节点自身 `requires`，不把内层依赖复制进文档。
 - **GraphDocument**：`version: 1`；显式 `nodes` 与 `edges`；节点 config/inputs/ui 必须是 JSON-safe；`ui` 仅服务设计器，运行时忽略。
 - **反序列化**：`Graph.fromJSON(doc, { registry })` 默认执行完整校验；编辑器可用 `{ validate: false }` 载入未完成草稿。
 - **序列化插件**：`HarnessSerializationPlugin` 预留节点迁移、私有字段编解码和第三方节点包接入点；当前内置逻辑只依赖 NodeTypeRegistry。
@@ -59,7 +60,7 @@ src/harness/
 - **显式 MergeNode（保留 / 实验）**：`core.merge` 仍可作为可见汇合点或自定义选择策略使用；它是否应作为默认推荐，等 GraphEditor 阶段用 `tools/merge-future-check.mjs` 预留脚本验证。
 - **Join 策略**：输入端口支持 `join: "exclusive" | "all" | "error"`。`all` 需要 `multiple: true`（value 聚合为 JSON 数组，stream 汇合所有通道）；`error` 在设计期拒绝多边；默认单值输入为 `exclusive`，并以运行时歧义错误兜底。当前只实现了 `exclusive` / `all` 的运行语义。
 - **B3 序列化与校验**：Branch / Merge 作为普通节点类型随 Graph JSON 往返；单输入多来源在默认 exclusive 下是合法图；`join` / `multiple` 的矛盾组合在 `Graph.validate()` 阶段报错；并发来源在运行时以 `AmbiguousJoin` 失败，不静默丢值。
-- **SubgraphNode（C1）**：`core.subgraph` 的 config 内嵌一个 `GraphDocument`；外层 `input` / `attachments` 映射到内层 `core.input`，内层 `core.output` 的 `text` / `attachments` / `json` 映射回外层。内层与外层共用同一个 `NodeTypeRegistry`、Provider/Tool/Attachment 服务和运行参数；内层 `custom` 事件以 `subgraph.<nodeId>.<event>` 转发，`node:skipped` 以 `subgraph.<nodeId>.node:skipped` 转发。内层图非法时外层节点以 `InvalidNode` 失败。
+- **SubgraphNode（C1）**：`core.subgraph` 的 config 内嵌一个 `GraphDocument`；外层 `input` / `attachments` 映射到内层 `core.input`，内层 `core.output` 的 `text` / `attachments` / `json` 映射回外层。内层与外层共用同一个 `NodeTypeRegistry`、Provider/Tool/Attachment 服务和运行参数；内层 `custom` 事件以 `subgraph.<nodeId>.<event>` 转发，`node:skipped` 以 `subgraph.<nodeId>.node:skipped` 转发。内层图非法时会在 run 启动前的 `assertValid()` 中以 `InvalidGraph` 失败，issues 带 `graphPath`；若运行中被绕过校验，节点仍以 `InvalidNode` 包装失败。
 - **core.value**：从 `GraphRunInput.values` 读取命名值，供子图、ForEach、Loop 和宿主参数复用；`required` 默认 true。
 - **ForEachNode（C2）**：输入 `items` JSON 数组，逐项运行内嵌子图；内层通过 `core.value` 读取 `item` / `iteration`。按顺序收集 `resultPort`（默认 text）到 `results` JSON 数组，并输出 `count` 与聚合后的 `attachments`；每轮发出 `forEach.<nodeId>.iteration` 事件；当前串行执行，支持外层取消。
 - **LoopNode（C2/C3）**：输入 `initial`，按 `config.maxIterations` 有界运行内嵌子图；内层通过 `core.value` 读取 `state` / `iteration`，`core.output.json` 约定为 `{ state, done? }`，`done === true` 提前结束。输出最终 `value`、`iterations`，以及最后一轮内层 `attachments`；每轮发出 `loop.<nodeId>.iteration` 事件。`retryOnError: true` 时，内层运行失败也会消耗一轮重试；当前状态只支持 JSON，串行执行。

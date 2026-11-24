@@ -282,13 +282,13 @@ export class GraphRun{
     }
 
     private async _validateRequirements(): Promise<void>{
-        const nodes = this._graph.nodes.filter(
-            (node) => node.requirements.length > 0,
-        );
+        const nodes = this._graph.nodes
+            .map((node) => ({ node, requirements: node.collectRequirements() }))
+            .filter((entry) => entry.requirements.length > 0);
         if (nodes.length === 0) return;
 
-        const needsTools = nodes.some((node) =>
-            node.requirements.some((requirement) => requirement.kind === "tool"));
+        const needsTools = nodes.some((entry) =>
+            entry.requirements.some((requirement) => requirement.kind === "tool"));
         const toolNames = new Set<string>();
         if (needsTools && this._host.tools !== undefined){
             const tools = await this._host.tools.listTools(this._abort.signal);
@@ -297,8 +297,8 @@ export class GraphRun{
 
         const parameters = this._host.parameters ?? {};
 
-        for (const node of nodes){
-            for (const requirement of node.requirements){
+        for (const { node, requirements } of nodes){
+            for (const requirement of requirements){
                 switch (requirement.kind){
                     case "tool":
                         if (!toolNames.has(requirement.name)){

@@ -3,6 +3,7 @@ import type { AIProvider } from "../../session/protocol";
 import type { ToolRegistry } from "../../session/tool";
 import type { ToolApprovalDecision, ToolApprovalRequest } from "../../session/session";
 import type { UserInputRequest, UserInputResult } from "../../session/type";
+import type { Graph } from "./graph";
 import type {
     HarnessInput,
     HarnessValue,
@@ -18,6 +19,26 @@ import type {
 } from "./type";
 
 export type MaybePromise<T> = T | Promise<T>;
+
+/** requirements 递归收集的最大深度，与内嵌图校验上限一致 */
+const MAX_REQUIREMENT_DEPTH = 8;
+
+/**
+ * 节点内嵌的子图。
+ *
+ * `Subgraph / Loop / ForEach` 等容器节点覆盖 `GraphNode.embeddedGraphs`，
+ * 让 `Graph.validate()` 能递归校验内层图，并把问题定位回容器节点。
+ */
+export type EmbeddedGraph = {
+    /** 相对父节点的路径片段，例如 `subgraph.<nodeId>` / `loop.<nodeId>` */
+    path: string;
+    /** 原始 GraphDocument；解析失败时用于错误信息 */
+    document: unknown;
+    /** 解析成功的内层图 */
+    graph?: Graph;
+    /** 解析失败原因 */
+    error?: unknown;
+};
 
 /** 运行时注入给节点的宿主服务；节点不直接持有 Provider 实例的构造信息 */
 export interface NodeServices{
@@ -115,6 +136,33 @@ export abstract class GraphNode{
         this._requirements = [...requirements];
     }
 
+    /**
+     * 节点自身 + 内嵌子图声明的全部依赖。
+     *
+     * 容器节点（Subgraph / Loop / ForEach）据此把内层 requirements 传播到
+     * 外层预检与编辑器目录；序列化仍只写 `requirements`（自身声明），
+     * 不把内层依赖复制进文档。
+     */
+    collectRequirements(depth = 0): readonly NodeRequirement[]{
+        const own = this.requirements;
+        if (depth >= MAX_REQUIREMENT_DEPTH) return [...own];
+
+        const nested: NodeRequirement[] = [];
+        for (const embedded of this.embeddedGraphs){
+            if (embedded.graph === undefined) continue;
+            for (const node of embedded.graph.nodes){
+                nested.push(...node.collectRequirements(depth + 1));
+            }
+        }
+
+        return uniqueRequirements([...own, ...nested]);
+    }
+
+    /** 内嵌子图；`Subgraph / Loop / ForEach` 覆盖。默认没有内嵌图。 */
+    get embeddedGraphs(): readonly EmbeddedGraph[]{
+        return [];
+    }
+
     /** 节点类型 ID，例如 core.model.call */
     abstract readonly type: string;
 
@@ -128,4 +176,33 @@ export abstract class GraphNode{
     abstract get outputs(): readonly OutputPortSpec[];
 
     abstract execute(ctx: NodeContext, inputs: NodeInputValues): Promise<NodeOutputValues>;
+}
+
+function uniqueRequirements(
+    requirements: readonly NodeRequirement[],
+): readonly NodeRequirement[]{
+    const seen = new Set<string>();
+    const unique: NodeRequirement[] = [];
+
+    for (const requirement of requirements){
+        const key = requirementKey(requirement);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        unique.push(requirement);
+    }
+
+    return unique;
+}
+
+function requirementKey(requirement: NodeRequirement): string{
+    switch (requirement.kind){
+        case "tool":
+            return `tool:${requirement.name}`;
+        case "provider":
+            return `provider:${requirement.providerId}`;
+        case "model":
+            return `model:${requirement.providerId}/${requirement.modelId}`;
+        case "parameter":
+            return `parameter:${requirement.name}`;
+    }
 }
