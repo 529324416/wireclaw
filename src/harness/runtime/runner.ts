@@ -1,4 +1,5 @@
 import { uniqueId } from "../../base";
+import { graphFingerprint, graphNodeVersions } from "./fingerprint";
 import { HarnessError, HarnessErrorCode } from "../base/error";
 import { cloneJson, isRecord } from "../base/utils";
 import { HarnessBuiltinNodeType } from "../definition";
@@ -88,6 +89,23 @@ export class GraphRun{
                 throw new HarnessError(
                     HarnessErrorCode.InvalidCheckpoint,
                     `Checkpoint graphId "${options.checkpoint.graphId}" does not match "${graph.id}"`,
+                );
+            }
+
+            const expectedHash = graphFingerprint(graph);
+            if (options.checkpoint.graphHash !== expectedHash){
+                throw new HarnessError(
+                    HarnessErrorCode.InvalidCheckpoint,
+                    "Checkpoint graph definition no longer matches the current graph",
+                );
+            }
+
+            const expectedVersions = graphNodeVersions(graph);
+            const checkpointVersions = options.checkpoint.nodeVersions;
+            if (JSON.stringify(checkpointVersions) !== JSON.stringify(expectedVersions)){
+                throw new HarnessError(
+                    HarnessErrorCode.InvalidCheckpoint,
+                    "Checkpoint node type versions no longer match the current graph",
                 );
             }
         }
@@ -858,9 +876,11 @@ export class GraphRun{
 
     private _createCheckpoint(): GraphCheckpoint{
         return cloneJson<GraphCheckpoint>({
-            version: 1,
+            version: 2,
             runId: this.id,
             graphId: this._graph.id,
+            graphHash: graphFingerprint(this._graph),
+            nodeVersions: graphNodeVersions(this._graph),
             input: this._input,
             outputs: Object.fromEntries(this._outputs),
             records: [...this._records],
@@ -957,9 +977,12 @@ export class GraphRun{
 
 function validateCheckpointShape(value: GraphCheckpoint): void{
     if (!isRecord(value)
-        || value.version !== 1
+        || value.version !== 2
         || typeof value.runId !== "string"
         || typeof value.graphId !== "string"
+        || typeof value.graphHash !== "string"
+        || value.graphHash.length === 0
+        || !isRecord(value.nodeVersions)
         || !isRecord(value.input)
         || !isRecord(value.outputs)
         || !Array.isArray(value.records)
@@ -993,6 +1016,14 @@ function validateCheckpointShape(value: GraphCheckpoint): void{
             HarnessErrorCode.InvalidCheckpoint,
             "Invalid checkpoint ready list",
         );
+    }
+    for (const version of Object.values(value.nodeVersions)){
+        if (typeof version !== "number" || !Number.isInteger(version) || version < 1){
+            throw new HarnessError(
+                HarnessErrorCode.InvalidCheckpoint,
+                "Invalid checkpoint node version",
+            );
+        }
     }
 }
 

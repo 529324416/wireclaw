@@ -106,8 +106,15 @@ section("pause -> checkpoint -> resume");
     const checkpoint = await run.pause();
 
     assert.equal(run.status, "paused");
-    assert.equal(checkpoint.version, 1);
+    assert.equal(checkpoint.version, 2);
     assert.equal(checkpoint.graphId, graph.id);
+    assert.ok(checkpoint.graphHash.startsWith("fnv1a64:"));
+    assert.deepEqual(checkpoint.nodeVersions, {
+        first: 1,
+        output: 1,
+        second: 1,
+        source: 1,
+    });
     assert.ok(checkpoint.records.some((record) => record.nodeId === "first"));
     assert.ok(!checkpoint.records.some((record) => record.nodeId === "second"));
     assert.equal(DelayNode.executions, 1);
@@ -155,7 +162,27 @@ section("同 run resume 与非法 checkpoint");
         (error: unknown) => error instanceof HarnessError
             && error.code === HarnessErrorCode.InvalidCheckpoint,
     );
-    console.log("PASS 同一 run 恢复，非法 graphId 被拒绝");
+    assert.throws(
+        () => graph.resume({
+            ...checkpoint,
+            graphHash: "fnv1a64:0000000000000000",
+        }, {
+            host: { resolveProvider: () => undefined },
+        }),
+        (error: unknown) => error instanceof HarnessError
+            && error.code === HarnessErrorCode.InvalidCheckpoint,
+    );
+    assert.throws(
+        () => graph.resume({
+            ...checkpoint,
+            nodeVersions: { ...checkpoint.nodeVersions, first: 2 },
+        }, {
+            host: { resolveProvider: () => undefined },
+        }),
+        (error: unknown) => error instanceof HarnessError
+            && error.code === HarnessErrorCode.InvalidCheckpoint,
+    );
+    console.log("PASS 同一 run 恢复，非法 graphId / graphHash / nodeVersions 被拒绝");
 }
 
 console.log("\nAll harness checkpoint checks passed.");

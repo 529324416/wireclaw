@@ -25,7 +25,7 @@ const loopValue = demo.loop.outputs.json;
 assert.equal(loopValue?.type, "json");
 if (loopValue?.type === "json") assert.equal(loopValue.value, 3);
 
-assert.equal(demo.checkpoint.version, 1);
+assert.equal(demo.checkpoint.version, 2);
 assert.ok(demo.checkpoint.records.some((record) => record.nodeId === "first"));
 assert.ok(!demo.checkpoint.records.some((record) => record.nodeId === "second"));
 

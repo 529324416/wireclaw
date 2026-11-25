@@ -63,9 +63,13 @@ export type GraphRunOptions = {
 
 /** 可序列化的暂停快照；恢复时仍需要原 Graph 定义 */
 export type GraphCheckpoint = {
-    version: 1;
+    version: 2;
     runId: string;
     graphId: string;
+    /** 可执行图定义（不含 ui / title / metadata）的稳定指纹 */
+    graphHash: string;
+    /** 顶层节点 id -> typeVersion；恢复时逐项比对 */
+    nodeVersions: Record<string, number>;
     input: GraphRunInput;
     outputs: Record<string, NodeOutputValues>;
     records: NodeRunRecord[];

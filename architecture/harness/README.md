@@ -139,7 +139,7 @@ Harness 是 wireclaw 的 **TS-first 可执行图运行时**，也是 Harness Des
 - `ForEach`：JSON 数组逐项运行子图，输出 results / count / attachments
 - `Loop`：bounded loop，JSON state + `done`，输出 value / iterations / attachments，支持 `retryOnError`
 - `pause()` / `resume()` / `Graph.resume(checkpoint, options)`
-- `GraphCheckpoint`：outputs、records、edgeStates、pending、ready
+- `GraphCheckpoint` v2：graphHash、nodeVersions、outputs、records、edgeStates、pending、ready
 - `run:paused` / `run:resumed` 事件
 
 ### 4.4 真实链路
@@ -186,10 +186,10 @@ Harness 是 wireclaw 的 **TS-first 可执行图运行时**，也是 Harness Des
 - `Graph.validate()` 已递归校验 Subgraph/Loop/ForEach 内嵌图；容器节点通过 `collectRequirements()` 把内层依赖传播到 run 预检与编辑器目录，但序列化不会把内层依赖写进外层文档；
 - Subgraph 只有固定 text/attachments/json 映射，没有显式端口契约；
 - 内嵌 GraphDocument 重复存储，没有 graph registry / version pinning；
-- checkpoint 只校验 graphId，不校验图内容 hash / node type version；
+- checkpoint 已校验 graphId、graphHash 与顶层 node type version；布局/标题变化不会使 checkpoint 失效；
 - 递归深度已有上限（8），但没有跨图引用去重。
 
-**影响**：设计期已能定位内层错误；恢复时图已变化仍可能语义不一致。
+**影响**：设计期已能定位内层错误；恢复时图定义或节点版本变化会报 `InvalidCheckpoint`。
 
 ### 5.4 可观测性不足
 
@@ -268,7 +268,7 @@ Harness 是 wireclaw 的 **TS-first 可执行图运行时**，也是 Harness Des
   - 显式端口映射；
   - [x] 内层 requirements 传播（2026-11-25）；
   - [x] 递归校验、递归深度保护（2026-11-25）；
-  - checkpoint graph hash / node type version；
+  - [x] checkpoint graph hash / node type version（2026-11-25）；
   - graph registry / 模板引用。
 
 ### Cycle E：可靠性与长任务
@@ -323,6 +323,6 @@ Harness 是 wireclaw 的 **TS-first 可执行图运行时**，也是 Harness Des
 - 可以用一个 Graph 表达“角色定稿 → 四格引用同一参考图 → 全局审查 → 局部重做 → 合并”；
 - 每格/每轮 attempt 的输入、输出、参考图、审查结果可在 trace 中查看；
 - 内层图错误在 `Graph.assertValid()` 阶段暴露；
-- checkpoint 能拒绝与当前图不一致的恢复；
+- [x] checkpoint 能拒绝与当前图不一致的恢复；
 - 四格漫画不再依赖大量根目录自定义节点才能表达主角一致性；
 - 视频类长任务可以持久化 jobId，并在进程重启后继续轮询/恢复。

@@ -64,7 +64,7 @@ src/harness/
 - **core.value**：从 `GraphRunInput.values` 读取命名值，供子图、ForEach、Loop 和宿主参数复用；`required` 默认 true。
 - **ForEachNode（C2）**：输入 `items` JSON 数组，逐项运行内嵌子图；内层通过 `core.value` 读取 `item` / `iteration`。按顺序收集 `resultPort`（默认 text）到 `results` JSON 数组，并输出 `count` 与聚合后的 `attachments`；每轮发出 `forEach.<nodeId>.iteration` 事件；当前串行执行，支持外层取消。
 - **LoopNode（C2/C3）**：输入 `initial`，按 `config.maxIterations` 有界运行内嵌子图；内层通过 `core.value` 读取 `state` / `iteration`，`core.output.json` 约定为 `{ state, done? }`，`done === true` 提前结束。输出最终 `value`、`iterations`，以及最后一轮内层 `attachments`；每轮发出 `loop.<nodeId>.iteration` 事件。`retryOnError: true` 时，内层运行失败也会消耗一轮重试；当前状态只支持 JSON，串行执行。
-- **暂停 / 恢复 / checkpoint（C3）**：`GraphRun.pause()` 停止调度新节点、等待当前活跃节点收尾，返回可 JSON 序列化的 `GraphCheckpoint`；`run.resume()` 在同一 run 继续，`Graph.resume(checkpoint, { host })` 从快照创建新 run。checkpoint 保存已完成输出、运行记录、edge 状态、pending 与 ready 列表，因此恢复时不会重跑已完成节点。暂停/恢复发出 `run:paused` / `run:resumed` 事件；`graphId` 不匹配或结构非法时报 `InvalidCheckpoint`。
+- **暂停 / 恢复 / checkpoint（C3）**：`GraphRun.pause()` 停止调度新节点、等待当前活跃节点收尾，返回可 JSON 序列化的 `GraphCheckpoint`；`run.resume()` 在同一 run 继续，`Graph.resume(checkpoint, { host })` 从快照创建新 run。checkpoint v2 保存 graphHash、nodeVersions、已完成输出、运行记录、edge 状态、pending 与 ready 列表，因此恢复时不会重跑已完成节点。暂停/恢复发出 `run:paused` / `run:resumed` 事件；`graphId`、可执行图 hash 或节点类型版本不匹配，或结构非法时报 `InvalidCheckpoint`。
 - **Fan-in**：`multiple` value 输入必须声明为 `json` / `any`，运行时把所有非 skipped 上游聚合为 JSON 数组；`multiple` stream 输入按 `join: "all"` 汇合多个通道。
 - **Skipped 传播**：调度器按 value 边逐一记录 `value` / `skipped`；required 输入来自 skipped 分支或全部 connected 输入都 skipped 时，节点 skipped；`node:skipped` 事件与记录状态可被 UI 展示。
 - **事件**：run/node 生命周期事件自动发出；`ctx.emit` 推流，`ctx.publish` 发 `custom` 事件；外部通过 `Graph.run({ listener })` 消费。
