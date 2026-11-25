@@ -14,6 +14,7 @@ import { ToolSet } from "../runtime/tool-set";
 import { isChatProvider } from "../../session/protocol";
 import { system } from "../../session/message";
 import type { Message } from "../../session/message";
+import { SessionSerializer } from "../../session/serialize";
 import {
     RunStatus,
     Session,
@@ -111,156 +112,186 @@ export class AgentRunNode extends GraphNode{
         const permission = readPermission(config);
         const maxSteps = readOptionalPositiveInteger(config, "maxSteps", this.type) ?? 8;
         const systemPrompt = readOptionalString(config, "system", this.type);
-
-        const specs: ToolSetSpec[] = [];
-        if (ctx.services.defaultToolSet !== undefined){
-            specs.push(ctx.services.defaultToolSet);
-        }
-        const nodeToolSet = inputs.toolset;
-        if (nodeToolSet !== undefined){
-            if (nodeToolSet.type !== "toolset"){
-                throw new HarnessError(
-                    HarnessErrorCode.InvalidValue,
-                    "AgentRun toolset input must be a toolset value",
-                    { nodeId: this.id },
-                );
-            }
-            specs.push(nodeToolSet.toolset);
-        }
-
-        const toolSource = ctx.services.tools === undefined
-            ? undefined
-            : specs.length === 0
-                ? ctx.services.tools
-                : new ToolSet(ctx.services.tools, specs);
-        const toolSetHost = toolSource instanceof ToolSet ? toolSource.hostTools : undefined;
-        const hostOptions = readHostOptions(config, toolSetHost);
-
         const history = new SessionHistory(
             undefined,
             systemPrompt === undefined ? [] : [system(systemPrompt)],
         );
-        const runtimeOptions = readRuntimeOptions(config, binding);
-        const session = new Session(
-            provider,
-            history,
-            runtimeOptions,
-            ctx.services.attachments,
-            hostOptions,
-        );
+        const startedAt = Date.now();
 
-        let handlerError: unknown;
-        const unsubscribe = session.subscribe((event) =>{
-            if (event.type === SessionEventType.ASSISTANT_TOKEN){
-                ctx.emit(event.isThinking ? "thinking" : "text", {
-                    type: "text",
-                    text: event.token,
-                });
-                return;
-            }
-
-            if (event.type === SessionEventType.TOOL_APPROVAL_REQUIRED){
-                const handler = ctx.services.onToolApproval;
-                if (handler === undefined){
-                    handlerError = new HarnessError(
-                        HarnessErrorCode.NodeExecutionFailed,
-                        "B 节点需要工具审批，但宿主没有提供 onToolApproval",
-                        { nodeId: this.id },
-                    );
-                    session.cancel();
-                    return;
-                }
-
-                void Promise.resolve(handler({
-                    call: event.call,
-                    tool: event.tool,
-                })).then((decision) =>{
-                    if (!session.resume(decision)) session.cancel();
-                }).catch((error: unknown) =>{
-                    handlerError = error;
-                    session.cancel();
-                });
-                return;
-            }
-
-            if (event.type === SessionEventType.TOOL_INPUT_REQUIRED){
-                const handler = ctx.services.onUserInput;
-                if (handler === undefined){
-                    handlerError = new HarnessError(
-                        HarnessErrorCode.NodeExecutionFailed,
-                        "B 节点调用了 host__ask_user，但宿主没有提供 onUserInput",
-                        { nodeId: this.id },
-                    );
-                    session.cancel();
-                    return;
-                }
-
-                void Promise.resolve(handler(event.request)).then((result) =>{
-                    if (!session.respondUserInput(result)) session.cancel();
-                }).catch((error: unknown) =>{
-                    handlerError = error;
-                    session.cancel();
-                });
-            }
-        });
-
-        let run: Run;
         try{
-            run = await session.run(
-                buildUserContent(input, attachments),
-                {
-                    tools: toolSource,
-                    permission,
-                    maxSteps,
-                    enableUserInput: hostOptions.hostTools === true
-                        || (typeof hostOptions.hostTools === "object"
-                            && hostOptions.hostTools.askUser !== false),
-                    toolProgressDelayMs: 0,
+            const specs: ToolSetSpec[] = [];
+            if (ctx.services.defaultToolSet !== undefined){
+                specs.push(ctx.services.defaultToolSet);
+            }
+            const nodeToolSet = inputs.toolset;
+            if (nodeToolSet !== undefined){
+                if (nodeToolSet.type !== "toolset"){
+                    throw new HarnessError(
+                        HarnessErrorCode.InvalidValue,
+                        "AgentRun toolset input must be a toolset value",
+                        { nodeId: this.id },
+                    );
+                }
+                specs.push(nodeToolSet.toolset);
+            }
+
+            const toolSource = ctx.services.tools === undefined
+                ? undefined
+                : specs.length === 0
+                    ? ctx.services.tools
+                    : new ToolSet(ctx.services.tools, specs);
+            const toolSetHost = toolSource instanceof ToolSet ? toolSource.hostTools : undefined;
+            const hostOptions = readHostOptions(config, toolSetHost);
+
+            const runtimeOptions = readRuntimeOptions(config, binding);
+            const session = new Session(
+                provider,
+                history,
+                runtimeOptions,
+                ctx.services.attachments,
+                hostOptions,
+            );
+
+            let handlerError: unknown;
+            const unsubscribe = session.subscribe((event) =>{
+                if (event.type === SessionEventType.ASSISTANT_TOKEN){
+                    ctx.emit(event.isThinking ? "thinking" : "text", {
+                        type: "text",
+                        text: event.token,
+                    });
+                    return;
+                }
+
+                if (event.type === SessionEventType.TOOL_APPROVAL_REQUIRED){
+                    const handler = ctx.services.onToolApproval;
+                    if (handler === undefined){
+                        handlerError = new HarnessError(
+                            HarnessErrorCode.NodeExecutionFailed,
+                            "B 节点需要工具审批，但宿主没有提供 onToolApproval",
+                            { nodeId: this.id },
+                        );
+                        session.cancel();
+                        return;
+                    }
+
+                    void Promise.resolve(handler({
+                        call: event.call,
+                        tool: event.tool,
+                    })).then((decision) =>{
+                        if (!session.resume(decision)) session.cancel();
+                    }).catch((error: unknown) =>{
+                        handlerError = error;
+                        session.cancel();
+                    });
+                    return;
+                }
+
+                if (event.type === SessionEventType.TOOL_INPUT_REQUIRED){
+                    const handler = ctx.services.onUserInput;
+                    if (handler === undefined){
+                        handlerError = new HarnessError(
+                            HarnessErrorCode.NodeExecutionFailed,
+                            "B 节点调用了 host__ask_user，但宿主没有提供 onUserInput",
+                            { nodeId: this.id },
+                        );
+                        session.cancel();
+                        return;
+                    }
+
+                    void Promise.resolve(handler(event.request)).then((result) =>{
+                        if (!session.respondUserInput(result)) session.cancel();
+                    }).catch((error: unknown) =>{
+                        handlerError = error;
+                        session.cancel();
+                    });
+                }
+            });
+
+            let run: Run;
+            try{
+                run = await session.run(
+                    buildUserContent(input, attachments),
+                    {
+                        tools: toolSource,
+                        permission,
+                        maxSteps,
+                        enableUserInput: hostOptions.hostTools === true
+                            || (typeof hostOptions.hostTools === "object"
+                                && hostOptions.hostTools.askUser !== false),
+                        toolProgressDelayMs: 0,
+                    },
+                );
+            }finally{
+                unsubscribe();
+            }
+
+            if (handlerError !== undefined){
+                throw new HarnessError(
+                    HarnessErrorCode.NodeExecutionFailed,
+                    `B 节点宿主回调失败: ${errorText(handlerError)}`,
+                    { nodeId: this.id, origin: handlerError },
+                );
+            }
+            if (run.status !== RunStatus.Completed){
+                throw new HarnessError(
+                    HarnessErrorCode.NodeExecutionFailed,
+                    `B 节点运行失败: ${run.error === undefined ? run.status : errorText(run.error)}`,
+                    { nodeId: this.id, origin: run.error },
+                );
+            }
+
+            const assistant = findLastAssistant(run.pendingMessages);
+            if (assistant === undefined){
+                throw new HarnessError(
+                    HarnessErrorCode.NodeExecutionFailed,
+                    "B 节点运行完成但没有 assistant 消息",
+                    { nodeId: this.id },
+                );
+            }
+
+            const outputs: Record<string, HarnessValue> = {
+                text: { type: "text", text: contentToText(assistant.content) },
+                attachments: {
+                    type: "attachments",
+                    attachments: collectAttachments(run.pendingMessages),
                 },
-            );
-        }finally{
-            unsubscribe();
-        }
+                usage: { type: "json", value: usageToJson(assistant.usage) },
+            };
+            if (assistant.thinking !== undefined){
+                outputs.thinking = { type: "text", text: assistant.thinking };
+            }
+            if (assistant.stopReason !== undefined){
+                outputs.stopReason = { type: "text", text: assistant.stopReason };
+            }
 
-        if (handlerError !== undefined){
-            throw new HarnessError(
-                HarnessErrorCode.NodeExecutionFailed,
-                `B 节点宿主回调失败: ${errorText(handlerError)}`,
-                { nodeId: this.id, origin: handlerError },
+            const snapshot = new SessionHistory(
+                history.id,
+                [...history.messages, ...run.pendingMessages],
+                history.isArchived,
             );
+            ctx.collect({
+                kind: "session",
+                providerId: binding.providerId,
+                modelId: binding.modelId,
+                status: "completed",
+                startedAt,
+                endedAt: Date.now(),
+                session: SessionSerializer.serialize(snapshot),
+            });
+            return outputs;
+        }catch(error){
+            ctx.collect({
+                kind: "session",
+                providerId: binding.providerId,
+                modelId: binding.modelId,
+                status: "failed",
+                startedAt,
+                endedAt: Date.now(),
+                session: SessionSerializer.serialize(history),
+                error: errorText(error),
+            });
+            throw error;
         }
-        if (run.status !== RunStatus.Completed){
-            throw new HarnessError(
-                HarnessErrorCode.NodeExecutionFailed,
-                `B 节点运行失败: ${run.error === undefined ? run.status : errorText(run.error)}`,
-                { nodeId: this.id, origin: run.error },
-            );
-        }
-
-        const assistant = findLastAssistant(run.pendingMessages);
-        if (assistant === undefined){
-            throw new HarnessError(
-                HarnessErrorCode.NodeExecutionFailed,
-                "B 节点运行完成但没有 assistant 消息",
-                { nodeId: this.id },
-            );
-        }
-
-        const outputs: Record<string, HarnessValue> = {
-            text: { type: "text", text: contentToText(assistant.content) },
-            attachments: {
-                type: "attachments",
-                attachments: collectAttachments(run.pendingMessages),
-            },
-            usage: { type: "json", value: usageToJson(assistant.usage) },
-        };
-        if (assistant.thinking !== undefined){
-            outputs.thinking = { type: "text", text: assistant.thinking };
-        }
-        if (assistant.stopReason !== undefined){
-            outputs.stopReason = { type: "text", text: assistant.stopReason };
-        }
-        return outputs;
     }
 }
 

@@ -2,7 +2,7 @@
 
 ## 对象模型与调度
 
-当前状态：Graph 对象模型、校验（含内嵌图递归校验）、JSON 序列化、运行时、ToolSet、流式端口、EventTrigger、节点预设、依赖校验、预设导入导出/迁移、GraphEditor 节点目录、调度级分支、隐式 exclusive join、fan-in、SubgraphNode、ForEach / Loop、暂停/恢复与 checkpoint，以及内建 input / output / constant / value / model / model.call / agent.run / toolset / choice / branch / merge / subgraph / foreach / loop / eventTrigger / log 节点已实现。
+当前状态：Graph 对象模型、校验（含内嵌图递归校验）、JSON 序列化、运行时、ToolSet、流式端口、EventTrigger、节点预设、依赖校验、预设导入导出/迁移、GraphEditor 节点目录、调度级分支、隐式 exclusive join、fan-in、SubgraphNode、ForEach / Loop、暂停/恢复与 checkpoint、`RunResult` 运行结果聚合，以及内建 input / output / constant / value / model / model.call / agent.run / toolset / choice / branch / merge / subgraph / foreach / loop / eventTrigger / log 节点已实现。
 
 ```text
 src/harness/
@@ -17,7 +17,8 @@ src/harness/
     event.ts          GraphEvent / GraphEventListener（运行时事件契约）
     graph.ts          Graph：validate / assertValid / toJSON / fromJSON
   runtime/
-    types.ts          GraphHost / GraphRunOptions / GraphRunResult / NodeRunRecord
+    types.ts          GraphHost / GraphRunOptions / GraphRunResult / NodeRunRecord / RunResult
+    run-result.ts     RunResultCollector / createRunResult / RunResultSerializer
     runner.ts         GraphRun、调度器、取消、生命周期事件
     channel.ts        OutputChannel（无界缓冲 + async iterator）
     tool-set.ts       ToolSet（ToolSource 过滤/收窄/host 工具策略）
@@ -48,6 +49,7 @@ src/harness/
 - **反序列化**：`Graph.fromJSON(doc, { registry })` 默认执行完整校验；编辑器可用 `{ validate: false }` 载入未完成草稿。
 - **序列化插件**：`HarnessSerializationPlugin` 预留节点迁移、私有字段编解码和第三方节点包接入点；当前内置逻辑只依赖 NodeTypeRegistry。
 - **运行入口**：`graph.run({ host, input, listener, signal, maxConcurrency })` 返回 `GraphRun`；`run.done` 解析 `GraphRunResult`，并支持 `cancel()` / `onEvent()`。
+- **RunResult**：`GraphRunResult` 携带 `graphId` / `entries`；`createRunResult(result, input?)` 生成版本化、JSON-safe 的 `RunResult` v1。`NodeContext.collect` 供 ModelCall / AgentRun 提交条目（模型调用与 Agent `SessionData`），运行时补齐 `id / nodeId / nodeType / graphPath`；`Subgraph / Loop / ForEach` 共享 collector 并让路径冒泡。`RunResultSerializer` 负责序列化与 JSON 校验，保留 partial 结果不写 checkpoint。
 - **调度器**：value-first DAG；依赖满足的节点并行执行（默认并发 4）；节点失败 fail-fast 并中止活跃节点；取消通过 AbortSignal 传播；每个节点写入 `NodeRunRecord`。
 - **GraphHost**：宿主注入 `resolveProvider`、`tools`、`attachments`、`onToolApproval`、`onUserInput`、`log`；Graph JSON 只保存 providerId / modelId，不保存 Provider 实例或密钥。
 - **内建节点**：`core.input` / `core.output` / `core.constant` / `core.value` / `core.model` / `core.model.call`（A，chat/generate）/ `core.agent.run`（B）/ `core.toolset` / `core.choice` / `core.branch` / `core.merge` / `core.subgraph` / `core.foreach` / `core.loop` / `core.eventTrigger` / `core.log`。

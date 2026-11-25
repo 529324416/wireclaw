@@ -30,6 +30,10 @@ export async function runSubgraph(
         input: options.input,
         listener: createListener(options.ctx, options.prefix),
         signal: options.signal ?? options.ctx.signal,
+        ...(options.ctx.resultCollector === undefined
+            ? {}
+            : { resultCollector: options.ctx.resultCollector }),
+        graphPath: [...options.ctx.graphPath, options.prefix],
     }).done;
 }
 

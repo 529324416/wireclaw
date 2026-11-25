@@ -89,11 +89,42 @@ export class ModelCallNode extends GraphNode{
         const binding = requireModelBinding(inputs.model);
         const prompt = requireText(inputs.prompt, "prompt");
         const refs = attachmentRefs(inputs.attachments);
+        const systemPrompt = mode === "chat"
+            ? readOptionalString(config, "system", this.type)
+            : undefined;
+        const startedAt = Date.now();
 
-        if (mode === "generate"){
-            return await this._generate(ctx, binding, prompt, refs, config);
+        try{
+            if (mode === "generate"){
+                return await this._generate(ctx, binding, prompt, refs, config, startedAt);
+            }
+            return await this._chat(
+                ctx,
+                binding,
+                prompt,
+                refs,
+                config,
+                systemPrompt,
+                startedAt,
+            );
+        }catch(error){
+            ctx.collect({
+                kind: "model-call",
+                providerId: binding.providerId,
+                modelId: binding.modelId,
+                mode,
+                status: "failed",
+                startedAt,
+                endedAt: Date.now(),
+                input: {
+                    prompt,
+                    ...(systemPrompt === undefined ? {} : { system: systemPrompt }),
+                    ...(refs.length === 0 ? {} : { attachments: [...refs] }),
+                },
+                error: errorText(error),
+            });
+            throw error;
         }
-        return await this._chat(ctx, binding, prompt, refs, config);
     }
 
     private async _chat(
@@ -102,6 +133,8 @@ export class ModelCallNode extends GraphNode{
         prompt: string,
         refs: readonly AttachmentRef[],
         config: Record<string, unknown>,
+        systemPrompt: string | undefined,
+        startedAt: number,
     ): Promise<NodeOutputValues>{
         const provider = ctx.services.resolveModel(binding);
         if (!isChatProvider(provider)){
@@ -112,7 +145,6 @@ export class ModelCallNode extends GraphNode{
             );
         }
 
-        const systemPrompt = readOptionalString(config, "system", this.type);
         const history = new SessionHistory(
             undefined,
             systemPrompt === undefined ? [] : [system(systemPrompt)],
@@ -177,6 +209,38 @@ export class ModelCallNode extends GraphNode{
         if (assistant.thinking !== undefined){
             outputs.thinking = { type: "text", text: assistant.thinking };
         }
+
+        const outputAttachments = contentAttachments(assistant.content);
+        ctx.collect({
+            kind: "model-call",
+            providerId: binding.providerId,
+            modelId: binding.modelId,
+            mode: "chat",
+            status: "completed",
+            startedAt,
+            endedAt: Date.now(),
+            input: {
+                prompt,
+                ...(systemPrompt === undefined ? {} : { system: systemPrompt }),
+                ...(refs.length === 0 ? {} : { attachments: [...refs] }),
+            },
+            output: {
+                text: contentToText(assistant.content),
+                ...(assistant.thinking === undefined
+                    ? {}
+                    : { thinking: assistant.thinking }),
+                ...(outputAttachments.length === 0
+                    ? {}
+                    : { attachments: [...outputAttachments] }),
+                usage: assistant.usage,
+                ...(assistant.stopReason === undefined
+                    ? {}
+                    : { stopReason: assistant.stopReason }),
+                ...(assistant.failureReason === undefined
+                    ? {}
+                    : { failureReason: assistant.failureReason }),
+            },
+        });
         return outputs;
     }
 
@@ -186,6 +250,7 @@ export class ModelCallNode extends GraphNode{
         prompt: string,
         refs: readonly AttachmentRef[],
         config: Record<string, unknown>,
+        startedAt: number,
     ): Promise<NodeOutputValues>{
         const provider = ctx.services.resolveModel(binding);
         if (!isGenerationProvider(provider)){
@@ -236,6 +301,24 @@ export class ModelCallNode extends GraphNode{
             const ref = await ingestor.ingest(pending, { signal: ctx.signal });
             attachments.push(ref);
         }
+
+        ctx.collect({
+            kind: "model-call",
+            providerId: binding.providerId,
+            modelId: binding.modelId,
+            mode: "generate",
+            status: "completed",
+            startedAt,
+            endedAt: Date.now(),
+            input: {
+                prompt,
+                ...(refs.length === 0 ? {} : { attachments: [...refs] }),
+            },
+            output: {
+                text: "",
+                ...(attachments.length === 0 ? {} : { attachments: [...attachments] }),
+            },
+        });
 
         return {
             text: { type: "text", text: "" },

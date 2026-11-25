@@ -18,6 +18,7 @@ import type {
     NodeOutputValues,
 } from "../graph/type";
 import { OutputChannel } from "./channel";
+import { RunResultCollector } from "./run-result";
 import type {
     GraphCheckpoint,
     GraphHost,
@@ -81,6 +82,8 @@ export class GraphRun{
     private _lastCheckpoint?: GraphCheckpoint;
     private readonly _checkpoint?: GraphCheckpoint;
     private _restored = false;
+    private readonly _collector: RunResultCollector;
+    private readonly _graphPath: readonly string[];
 
     constructor(graph: Graph, options: GraphRunOptions){
         if (options.checkpoint !== undefined){
@@ -115,6 +118,8 @@ export class GraphRun{
         this._checkpoint = options.checkpoint;
         this._input = options.checkpoint?.input ?? options.input ?? {};
         this._maxConcurrency = normalizeConcurrency(options.maxConcurrency);
+        this._collector = options.resultCollector ?? new RunResultCollector();
+        this._graphPath = options.graphPath ?? [];
         this.id = options.checkpoint?.runId ?? `run-${uniqueId()}`;
         this.done = new Promise<GraphRunResult>((resolve) => {
             this._resolveDone = resolve;
@@ -756,6 +761,9 @@ export class GraphRun{
             },
             stream: (port) => this._streamInput(node, port),
             emit: (port, chunk) => this._emitNodeChunk(node, port, chunk),
+            collect: (entry) => this._collector.add(node, this._graphPath, entry),
+            graphPath: this._graphPath,
+            resultCollector: this._collector,
             publish: (event, payload) =>{
                 this._sequence += 1;
                 this._emit({
@@ -944,9 +952,11 @@ export class GraphRun{
 
         const result: GraphRunResult = {
             runId: this.id,
+            graphId: this._graph.id,
             status,
             outputs,
             records: [...this._records],
+            entries: this._collector.snapshot(),
             startedAt: this._startedAt,
             endedAt,
             ...(this._failure === undefined ? {} : { error: this._failure }),

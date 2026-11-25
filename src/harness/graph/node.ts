@@ -3,6 +3,7 @@ import type { AIProvider } from "../../session/protocol";
 import type { ToolRegistry } from "../../session/tool";
 import type { ToolApprovalDecision, ToolApprovalRequest } from "../../session/session";
 import type { UserInputRequest, UserInputResult } from "../../session/type";
+import type { RunResultCollector, RunResultEntryDraft } from "../runtime/types";
 import type { Graph } from "./graph";
 import type {
     HarnessInput,
@@ -106,6 +107,19 @@ export interface NodeContext{
 
     /** EventTrigger 等节点向宿主发布自定义事件 */
     publish(event: string, payload: JsonValue): void;
+
+    /**
+     * @internal 提交一条运行结果条目（模型调用 / Agent 会话）。
+     *
+     * `id` / `nodeId` / `nodeType` / `graphPath` 由运行时补齐，节点只负责提供内容。
+     */
+    collect(entry: RunResultEntryDraft): void;
+
+    /** @internal 当前内嵌图路径；顶层图为空数组 */
+    readonly graphPath: readonly string[];
+
+    /** @internal 嵌套运行共享的结果采集器；由 GraphRun 注入 */
+    readonly resultCollector?: RunResultCollector;
 }
 
 /**
