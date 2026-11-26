@@ -29,11 +29,20 @@ export class SessionError extends WireclawError{
     /** 错误来源 */
     readonly origin?: unknown;
 
-    constructor(type: SessionErrorType, message?: string, origin?: unknown){
+    /** HTTP 状态码；仅 Provider 收到 HTTP 响应时存在，用于宿主区分 401/403 与 402/429 */
+    readonly httpStatus?: number;
+
+    constructor(
+        type: SessionErrorType,
+        message?: string,
+        origin?: unknown,
+        httpStatus?: number,
+    ){
         super(message ?? type);
         this.name = "SessionError";
         this.type = type;
         this.origin = origin;
+        if (httpStatus !== undefined) this.httpStatus = httpStatus;
     }
 }
 

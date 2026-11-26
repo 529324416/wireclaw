@@ -356,6 +356,8 @@ export class MiniMaxH3ImageProvider extends AIProvider implements GenerationCapa
                     SessionErrorType.ProviderError,
                     `MiniMax H3-Image returned HTTP ${response.status}`
                         + (body.length > 0 ? `: ${body.slice(0, 500)}` : ""),
+                    undefined,
+                    response.status,
                 );
             }
 

@@ -66,6 +66,8 @@ export async function httpError(
     return new SessionError(
         SessionErrorType.ProviderError,
         `${action} returned HTTP ${response.status}${await readErrorDetail(response, maxChars)}`,
+        undefined,
+        response.status,
     );
 }
 

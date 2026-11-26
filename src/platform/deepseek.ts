@@ -186,6 +186,8 @@ export class DeepSeekModelProvider extends ModelProvider {
             throw new SessionError(
                 SessionErrorType.ProviderError,
                 await httpError(`DeepSeek ${action}`, response),
+                undefined,
+                response.status,
             );
         }
 
@@ -307,6 +309,8 @@ export class DeepSeekCloudFileManager extends CloudFileManager {
             throw new SessionError(
                 SessionErrorType.ProviderError,
                 await httpError(`DeepSeek verify file ${fileId}`, response),
+                undefined,
+                response.status,
             );
         }
 
@@ -351,6 +355,8 @@ export class DeepSeekCloudFileManager extends CloudFileManager {
             throw new SessionError(
                 SessionErrorType.ProviderError,
                 await httpError("DeepSeek upload file", response),
+                undefined,
+                response.status,
             );
         }
 

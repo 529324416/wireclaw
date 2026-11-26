@@ -14,6 +14,7 @@ import { MergeNode } from "./merge";
 import { ModelNode } from "./model";
 import { ModelCallNode } from "./model-call";
 import { OutputNode } from "./output";
+import { ProviderNode } from "./provider";
 import { SubgraphNode } from "./subgraph";
 import { ToolSetNode } from "./tool-set";
 import { ValueNode } from "./value";
@@ -23,6 +24,7 @@ export * from "./output";
 export * from "./constant";
 export * from "./model";
 export * from "./model-call";
+export * from "./provider";
 export * from "./agent-run";
 export * from "./tool-set";
 export * from "./choice";
@@ -122,6 +124,28 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         create: (id, config, inputs, ui) => new ConstantNode(id, config, inputs, ui),
     });
     registry.register({
+        type: HarnessBuiltinNodeType.Provider,
+        version: 1,
+        title: "Provider",
+        description: "声明 Provider Profile；输出可连到 Model 的 provider 输入",
+        builtIn: true,
+        category: "model",
+        keywords: ["provider", "模型服务", "密钥", "连接"],
+        configSchema: {
+            type: "object",
+            properties: {
+                providerId: {
+                    title: "Provider ID",
+                    type: "string",
+                    description: "Provider Profile id；由宿主的 Provider 库提供",
+                },
+            },
+            required: ["providerId"],
+        },
+        defaultConfig: { providerId: "" },
+        create: (id, config, inputs, ui) => new ProviderNode(id, config, inputs, ui),
+    });
+    registry.register({
         type: HarnessBuiltinNodeType.Model,
         version: 1,
         title: "Model",
@@ -135,7 +159,7 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
                 providerId: {
                     title: "Provider ID",
                     type: "string",
-                    description: "如 deepseek / ollama / qwen",
+                    description: "未连接 Provider 节点时使用；连接后以连接为准",
                 },
                 modelId: {
                     title: "Model ID",
@@ -143,7 +167,7 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
                     description: "如 deepseek-chat",
                 },
             },
-            required: ["providerId", "modelId"],
+            required: ["modelId"],
         },
         defaultConfig: { providerId: "", modelId: "" },
         create: (id, config, inputs, ui) => new ModelNode(id, config, inputs, ui),

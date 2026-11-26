@@ -346,6 +346,8 @@ export class MiniMaxH3VideoProvider extends AIProvider implements GenerationCapa
                     SessionErrorType.ProviderError,
                     `MiniMax H3 Video returned HTTP ${response.status}`
                         + (text.length > 0 ? `: ${text.slice(0, 500)}` : ""),
+                    undefined,
+                    response.status,
                 );
             }
 

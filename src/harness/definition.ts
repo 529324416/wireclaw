@@ -10,6 +10,7 @@ export const HarnessBuiltinNodeType = {
     Constant: "core.constant",
     Value: "core.value",
     Model: "core.model",
+    Provider: "core.provider",
     ModelCall: "core.model.call",
     AgentRun: "core.agent.run",
     ToolSet: "core.toolset",

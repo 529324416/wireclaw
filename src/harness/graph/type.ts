@@ -15,6 +15,7 @@ export const PORT_VALUE_TYPES = [
     "text",
     "json",
     "model",
+    "provider",
     "toolset",
     "attachment",
     "attachments",
@@ -67,6 +68,11 @@ export type ModelBinding = {
     modelId: string;
 };
 
+/** Provider 引用；由 Provider 节点产出，Model 节点消费 */
+export type ProviderRef = {
+    providerId: string;
+};
+
 /** Harness 层的工具可见范围描述；真正的 ToolSet 在运行时由宿主构造 */
 export type ToolSetSpec = {
     include?: readonly string[];
@@ -82,6 +88,7 @@ export type HarnessValue =
     | { type: "text"; text: string }
     | { type: "json"; value: JsonValue }
     | { type: "model"; model: ModelBinding }
+    | { type: "provider"; provider: ProviderRef }
     | { type: "toolset"; toolset: ToolSetSpec }
     | { type: "attachment"; attachment: AttachmentRef }
     | { type: "attachments"; attachments: readonly AttachmentRef[] };
@@ -183,6 +190,12 @@ export function isModelBinding(value: unknown): value is ModelBinding{
         && record.modelId.length > 0;
 }
 
+export function isProviderRef(value: unknown): value is ProviderRef{
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+    const record = value as Record<string, unknown>;
+    return typeof record.providerId === "string" && record.providerId.length > 0;
+}
+
 export function isToolSetSpec(value: unknown): value is ToolSetSpec{
     if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
 
@@ -211,6 +224,8 @@ export function isHarnessValue(value: unknown): value is HarnessValue{
             return isJsonValue(record.value);
         case "model":
             return isModelBinding(record.model);
+        case "provider":
+            return isProviderRef(record.provider);
         case "toolset":
             return isToolSetSpec(record.toolset);
         case "attachment":
@@ -255,6 +270,8 @@ export function isHarnessValueCompatible(
             return portType === "json";
         case "model":
             return portType === "model";
+        case "provider":
+            return portType === "provider";
         case "toolset":
             return portType === "toolset";
         case "attachment":

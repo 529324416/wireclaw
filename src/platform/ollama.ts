@@ -364,6 +364,8 @@ export class OllamaModelProvider extends ModelProvider{
             throw new SessionError(
                 SessionErrorType.NetworkError,
                 `Ollama returned HTTP ${response.status}`,
+                undefined,
+                response.status,
             );
         }catch(error){
             if (error instanceof SessionError) throw error;
@@ -395,6 +397,8 @@ export class OllamaModelProvider extends ModelProvider{
             throw new SessionError(
                 SessionErrorType.ProviderError,
                 `Ollama /api/tags returned HTTP ${response.status}: ${body}`,
+                undefined,
+                response.status,
             );
         }
 
@@ -628,6 +632,8 @@ export class OllamaProvider extends AIProvider implements ChatCapability{
             throw new SessionError(
                 SessionErrorType.ProviderError,
                 `Ollama /api/chat returned HTTP ${response.status}: ${body}`,
+                undefined,
+                response.status,
             );
         }
 

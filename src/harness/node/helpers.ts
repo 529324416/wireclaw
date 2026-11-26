@@ -13,7 +13,9 @@ import type {
     JsonObject,
     JsonValue,
     ModelBinding,
+    ProviderRef,
 } from "../graph/type";
+import { isProviderRef } from "../graph/type";
 
 export function readConfig(
     config: JsonValue | undefined,
@@ -100,6 +102,16 @@ export function requireModelBinding(value: HarnessValue | undefined): ModelBindi
         );
     }
     return value.model;
+}
+
+export function requireProviderRef(value: HarnessValue | undefined): ProviderRef{
+    if (value === undefined || value.type !== "provider" || !isProviderRef(value.provider)){
+        throw new HarnessError(
+            HarnessErrorCode.InvalidValue,
+            "Node input \"provider\" must be a provider reference",
+        );
+    }
+    return value.provider;
 }
 
 export function readBooleanCondition(value: HarnessValue | undefined): boolean{

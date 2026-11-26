@@ -166,6 +166,8 @@ export class MiniMaxModelProvider extends ModelProvider {
                 SessionErrorType.ProviderError,
                 `MiniMax /v1/models returned HTTP ${response.status}`
                     + (body.length > 0 ? `: ${body.slice(0, 300)}` : ""),
+                undefined,
+                response.status,
             );
         }
 
