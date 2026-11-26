@@ -26,6 +26,7 @@ import type {
     GraphRunOptions,
     GraphRunResult,
     NodeRunRecord,
+    RunResultEntry,
 } from "./types";
 
 const DEFAULT_MAX_CONCURRENCY = 4;
@@ -147,6 +148,11 @@ export class GraphRun{
 
     get checkpoint(): GraphCheckpoint | undefined{
         return this._lastCheckpoint;
+    }
+
+    /** 运行期间已采集的 RunResult 条目快照（用于宿主逐步展示 / 落库）。 */
+    get resultEntries(): readonly RunResultEntry[]{
+        return this._collector.snapshot();
     }
 
     onEvent(listener: GraphEventListener): () => void{
