@@ -4,8 +4,10 @@ import type { JsonObject } from "../graph/type";
 import { AgentRunNode } from "./agent-run";
 import { BranchNode } from "./branch";
 import { ChoiceNode } from "./choice";
+import { CombineNode } from "./combine";
 import { ConstantNode } from "./constant";
 import { EventTriggerNode } from "./event-trigger";
+import { FilterNode } from "./filter";
 import { ForEachNode } from "./foreach";
 import { InputNode } from "./input";
 import { LogSinkNode } from "./log-sink";
@@ -29,6 +31,8 @@ export * from "./agent-run";
 export * from "./tool-set";
 export * from "./choice";
 export * from "./branch";
+export * from "./filter";
+export * from "./combine";
 export * from "./merge";
 export * from "./subgraph";
 export * from "./value";
@@ -365,13 +369,44 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         create: (id, config, inputs, ui) => new BranchNode(id, config, inputs, ui),
     });
     registry.register({
-        type: HarnessBuiltinNodeType.Merge,
+        type: HarnessBuiltinNodeType.Filter,
         version: 1,
-        title: "Merge",
-        description: "汇合 BranchNode 的可选分支输出",
+        title: "Filter",
+        description: "从两路可选分支中过滤出一路值（有 a 取 a，否则 b）",
         builtIn: true,
         category: "control",
-        keywords: ["merge", "汇合", "合并", "join"],
+        keywords: ["filter", "过滤", "汇合", "分支", "merge"],
+        create: (id, config, inputs, ui) => new FilterNode(id, config, inputs, ui),
+    });
+    registry.register({
+        type: HarnessBuiltinNodeType.Combine,
+        version: 1,
+        title: "Combine",
+        description: "把两个文本输入按顺序合并为一个文本",
+        builtIn: true,
+        category: "data",
+        keywords: ["combine", "merge", "合并", "拼接", "文本", "join"],
+        configSchema: {
+            type: "object",
+            properties: {
+                separator: {
+                    title: "分隔符",
+                    type: "string",
+                    description: "两段文本之间的分隔符；默认空串",
+                },
+            },
+        },
+        defaultConfig: { separator: "" },
+        create: (id, config, inputs, ui) => new CombineNode(id, config, inputs, ui),
+    });
+    registry.register({
+        type: HarnessBuiltinNodeType.Merge,
+        version: 1,
+        title: "Filter（旧 Merge）",
+        description: "旧 Merge 节点，行为等同 Filter，仅用于旧图 / 旧 run 兼容",
+        builtIn: true,
+        category: "control",
+        keywords: ["merge", "legacy", "旧"],
         create: (id, config, inputs, ui) => new MergeNode(id, config, inputs, ui),
     });
     registry.register({

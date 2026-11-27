@@ -28,11 +28,11 @@ Landing B 分支案例：
 npm run example:branch
 ```
 
-- `examples/harness/branching.ts` 创建 Branch 图时**不包含 MergeNode**；
+- `examples/harness/branching.ts` 创建 Branch 图时**不包含 Filter 节点**；
 - 条件 true/false 分别只执行对应分支，另一侧 `skipped`；
 - 两条分支输出直接连入同一个 input，由运行时隐式 `exclusive` join 汇合；
 - 两个并发来源直接进入同一输入时，以 `AmbiguousJoin` 失败；
-- 显式 MergeNode 仍作为对照路径可用。
+- 显式 Filter 节点仍作为对照路径可用（旧 `core.merge` 行为相同）。
 
 Landing C 组合案例：
 

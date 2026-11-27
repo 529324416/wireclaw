@@ -2,7 +2,7 @@
 
 ## 对象模型与调度
 
-当前状态：Graph 对象模型、校验（含内嵌图递归校验）、JSON 序列化、运行时、ToolSet、流式端口、EventTrigger、节点预设、依赖校验、预设导入导出/迁移、GraphEditor 节点目录、调度级分支、隐式 exclusive join、fan-in、SubgraphNode、ForEach / Loop、暂停/恢复与 checkpoint、`RunResult` 运行结果聚合，以及内建 input / output / constant / value / model / model.call / agent.run / toolset / choice / branch / merge / subgraph / foreach / loop / eventTrigger / log 节点已实现。
+当前状态：Graph 对象模型、校验（含内嵌图递归校验）、JSON 序列化、运行时、ToolSet、流式端口、EventTrigger、节点预设、依赖校验、预设导入导出/迁移、GraphEditor 节点目录、调度级分支、隐式 exclusive join、fan-in、SubgraphNode、ForEach / Loop、暂停/恢复与 checkpoint、`RunResult` 运行结果聚合，以及内建 input / output / constant / value / model / model.call / agent.run / toolset / choice / branch / filter / combine / subgraph / foreach / loop / eventTrigger / log 节点已实现（`core.merge` 为 Filter 的旧别名）。
 
 ```text
 src/harness/
@@ -34,7 +34,7 @@ src/harness/
     serialize.ts      预设/节点库导入导出与版本迁移
   editor/
     catalog.ts        GraphEditor 节点目录契约
-  node/               内建节点：input / output / constant / value / model / model.call / agent.run / toolset / choice / branch / merge / subgraph / foreach / loop / eventTrigger / log
+  node/               内建节点：input / output / constant / value / model / model.call / agent.run / toolset / choice / branch / filter / combine / subgraph / foreach / loop / eventTrigger / log
 ```
 
 核心设计：
@@ -52,17 +52,18 @@ src/harness/
 - **RunResult**：`GraphRunResult` 携带 `graphId` / `entries`；`createRunResult(result, input?)` 生成版本化、JSON-safe 的 `RunResult` v1。`NodeContext.collect` 供 ModelCall / AgentRun 提交条目（模型调用与 Agent `SessionData`），运行时补齐 `id / nodeId / nodeType / graphPath`；`Subgraph / Loop / ForEach` 共享 collector 并让路径冒泡。`RunResultSerializer` 负责序列化与 JSON 校验，保留 partial 结果不写 checkpoint。
 - **调度器**：value-first DAG；依赖满足的节点并行执行（默认并发 4）；节点失败 fail-fast 并中止活跃节点；取消通过 AbortSignal 传播；每个节点写入 `NodeRunRecord`。
 - **GraphHost**：宿主注入 `resolveProvider`、`tools`、`attachments`、`onToolApproval`、`onUserInput`、`log`；Graph JSON 只保存 providerId / modelId，不保存 Provider 实例或密钥。
-- **内建节点**：`core.input` / `core.output` / `core.constant` / `core.value` / `core.model` / `core.model.call`（A，chat/generate）/ `core.agent.run`（B）/ `core.toolset` / `core.choice` / `core.branch` / `core.merge` / `core.subgraph` / `core.foreach` / `core.loop` / `core.eventTrigger` / `core.log`。
+- **内建节点**：`core.input` / `core.output` / `core.constant` / `core.value` / `core.model` / `core.model.call`（A，chat/generate）/ `core.agent.run`（B）/ `core.toolset` / `core.choice` / `core.branch` / `core.filter` / `core.combine` / `core.subgraph` / `core.foreach` / `core.loop` / `core.eventTrigger` / `core.log`；`core.merge` 为 Filter 的旧别名（旧图 / 旧 run 兼容）。
 - **A 节点**：复用一次性 Session 调用现有附件解析与模型门禁（`maxSteps: 1`、host 工具关闭）；chat 模式把 `ASSISTANT_TOKEN` 转发为 `text` / `thinking` 流；generate 模式走 `GenerationCapability` 并落盘附件。
 - **B 节点**：复用 Session/AgentLoop，注入权限、`maxSteps` 与 `ToolSet`；审批与 `host__ask_user` 通过 `GraphHost` 回调桥接；默认不注册 host 内置工具。
 - **A/B 数据端口与本地回退（2026-11-27）**：`core.model.call` 新增 `system` / `parameters` 输入，`core.agent.run` 新增 `system` / `hostTools` 输入；`model` / `prompt` / `input` 的 `required` 移除。端口连接时覆盖同名 config 字段（`system` / `parameters` / `hostTools`），未连接时回退 config（`providerId` / `modelId` / `prompt` / `input` / `attachments` / `toolset`）；缺值在节点执行期报 `InvalidNode`，不再在解析期抛 `MissingInput`。
 - **ToolSet**：`Graph.toolSet` 是默认上限，`core.toolset` 节点产生节点级 spec，B 节点的 `toolset` 输入在 Graph 级之上进一步收窄；`ToolSet` 实现 `ToolSource`，不修改 Session。host 工具策略按 AND 合并。
 - **流式**：输入端口可声明 `mode: "stream"`；A/B 的 `text` / `thinking` 输出支持 value + stream；运行时用 `OutputChannel` 缓冲并按端口推送。`core.eventTrigger` 把流逐块发布为 `custom` 事件，`core.log` 写入宿主日志。流消费者与上游并发执行，图完成时等待流关闭。
 - **ChoiceNode**：`core.choice` 是值选择，`whenTrue` / `whenFalse` 两条上游都会执行。
-- **Branch / 隐式 Join**：`core.branch` 接收 `value` + `condition`，只在 `true` / `false` 其中一个端口产出；另一个端口及下游被标记为 `skipped`。两个输出共享 `exclusiveGroup` 标签。单值输入收到多个 value 上游时默认执行 `exclusive` join：恰好一个值则通过，多个值报 `AmbiguousJoin`，全部 skipped 则节点 skipped。普通分支汇合不再必须手动 MergeNode。
-- **显式 MergeNode（保留 / 实验）**：`core.merge` 仍可作为可见汇合点或自定义选择策略使用；它是否应作为默认推荐，等 GraphEditor 阶段用 `tools/merge-future-check.mjs` 预留脚本验证。
+- **Branch / 隐式 Join**：`core.branch` 接收 `value` + `condition`，只在 `true` / `false` 其中一个端口产出；另一个端口及下游被标记为 `skipped`。两个输出共享 `exclusiveGroup` 标签。单值输入收到多个 value 上游时默认执行 `exclusive` join：恰好一个值则通过，多个值报 `AmbiguousJoin`，全部 skipped 则节点 skipped。普通分支汇合不再必须手动 Filter 节点。
+- **Filter（2026-11-28）**：`core.filter` 接收两个可选输入 `a` / `b`，输出其中一路（`a ?? b`），用于显式汇合 / 过滤分支；两路都缺失时执行期报 `MissingValue`。旧 `core.merge` 仍注册为同一行为的兼容别名。
+- **Combine（2026-11-28）**：`core.combine` 接收两个 `text` 输入 `a` / `b`，按顺序拼接为单个 `text` 输出；`config.separator`（默认空串）作为连接符，只连接一路时直接透传，两路都缺失时执行期报 `MissingValue`。
 - **Join 策略**：输入端口支持 `join: "exclusive" | "all" | "error"`。`all` 需要 `multiple: true`（value 聚合为 JSON 数组，stream 汇合所有通道）；`error` 在设计期拒绝多边；默认单值输入为 `exclusive`，并以运行时歧义错误兜底。当前只实现了 `exclusive` / `all` 的运行语义。
-- **B3 序列化与校验**：Branch / Merge 作为普通节点类型随 Graph JSON 往返；单输入多来源在默认 exclusive 下是合法图；`join` / `multiple` 的矛盾组合在 `Graph.validate()` 阶段报错；并发来源在运行时以 `AmbiguousJoin` 失败，不静默丢值。
+- **B3 序列化与校验**：Branch / Filter / Combine 作为普通节点类型随 Graph JSON 往返；单输入多来源在默认 exclusive 下是合法图；`join` / `multiple` 的矛盾组合在 `Graph.validate()` 阶段报错；并发来源在运行时以 `AmbiguousJoin` 失败，不静默丢值。
 - **SubgraphNode（C1）**：`core.subgraph` 的 config 内嵌一个 `GraphDocument`；外层 `input` / `attachments` 映射到内层 `core.input`，内层 `core.output` 的 `text` / `attachments` / `json` 映射回外层。内层与外层共用同一个 `NodeTypeRegistry`、Provider/Tool/Attachment 服务和运行参数；内层 `custom` 事件以 `subgraph.<nodeId>.<event>` 转发，`node:skipped` 以 `subgraph.<nodeId>.node:skipped` 转发。内层图非法时会在 run 启动前的 `assertValid()` 中以 `InvalidGraph` 失败，issues 带 `graphPath`；若运行中被绕过校验，节点仍以 `InvalidNode` 包装失败。
 - **core.value**：从 `GraphRunInput.values` 读取命名值，供子图、ForEach、Loop 和宿主参数复用；`required` 默认 true。
 - **ForEachNode（C2）**：输入 `items` JSON 数组，逐项运行内嵌子图；内层通过 `core.value` 读取 `item` / `iteration`。按顺序收集 `resultPort`（默认 text）到 `results` JSON 数组，并输出 `count` 与聚合后的 `attachments`；每轮发出 `forEach.<nodeId>.iteration` 事件；当前串行执行，支持外层取消。

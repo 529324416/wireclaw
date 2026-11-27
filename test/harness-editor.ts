@@ -89,7 +89,7 @@ section("内建节点目录");
     assert.ok(catalog.nodeTypes.some((entry) => entry.type === HarnessBuiltinNodeType.EventTrigger));
 
     const withSchema = catalog.nodeTypes.filter((entry) => entry.configSchema !== undefined);
-    assert.equal(withSchema.length, 12);
+    assert.equal(withSchema.length, 13);
     assert.ok(catalog.nodeTypes.some((entry) => entry.type === HarnessBuiltinNodeType.Provider));
     assert.ok(catalog.nodeTypes.every((entry) => entry.category !== undefined));
     const constant = catalog.nodeTypes.find(

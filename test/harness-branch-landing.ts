@@ -45,7 +45,7 @@ if (mergeText?.type === "text"){
 
 const document = createAutoJoinBranchGraph(true).toJSON();
 assert.ok(!document.nodes.some(
-    (node) => node.type === HarnessBuiltinNodeType.Merge,
+    (node) => node.type === HarnessBuiltinNodeType.Filter,
 ));
 
 const loaded = Graph.fromJSON(document, { registry: createBranchRegistry() });
@@ -60,4 +60,4 @@ if (loadedText?.type === "text"){
     assert.equal(loadedText.text, "hello-A");
 }
 
-console.log("PASS Landing B: implicit exclusive join, skipped, ambiguity, explicit merge");
+console.log("PASS Landing B: implicit exclusive join, skipped, ambiguity, explicit filter");

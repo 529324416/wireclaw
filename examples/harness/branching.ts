@@ -107,7 +107,7 @@ function branchNodes(
     if (withMerge){
         const merge = registry.createNode({
             id: "merge",
-            type: HarnessBuiltinNodeType.Merge,
+            type: HarnessBuiltinNodeType.Filter,
             typeVersion: 1,
         });
         nodes.push(merge, output);
@@ -131,12 +131,12 @@ function branchNodes(
     });
 }
 
-/** 普通 Branch 图：不手动放 MergeNode，系统用 exclusive join 汇合 */
+/** 普通 Branch 图：不手动放 Filter 节点，系统用 exclusive join 汇合 */
 export function createAutoJoinBranchGraph(condition: boolean): Graph{
     return branchNodes(condition, false);
 }
 
-/** 对照：显式 MergeNode */
+/** 对照：显式 Filter 节点 */
 export function createExplicitMergeBranchGraph(condition: boolean): Graph{
     return branchNodes(condition, true);
 }

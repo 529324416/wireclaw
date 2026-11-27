@@ -18,11 +18,11 @@ function skippedNodes(result: GraphRunResult): string{
 }
 
 const autoDocument = createAutoJoinBranchGraph(true).toJSON();
-const hasMerge = autoDocument.nodes.some(
-    (node) => node.type === HarnessBuiltinNodeType.Merge,
+const hasFilter = autoDocument.nodes.some(
+    (node) => node.type === HarnessBuiltinNodeType.Filter,
 );
 console.log(`auto graph nodes: ${autoDocument.nodes.map((node) => node.type).join(", ")}`);
-console.log(`auto graph contains MergeNode: ${String(hasMerge)}`);
+console.log(`auto graph contains FilterNode: ${String(hasFilter)}`);
 console.log("");
 
 const demo = await runBranchLandingExample();
@@ -45,10 +45,10 @@ if (demo.ambiguous.error instanceof HarnessError){
 }
 console.log("");
 
-console.log(`[4] explicit MergeNode: status=${demo.explicitMerge.status}`);
+console.log(`[4] explicit FilterNode: status=${demo.explicitMerge.status}`);
 console.log(`    output=${outputText(demo.explicitMerge)}`);
 
-const ok = !hasMerge
+const ok = !hasFilter
     && demo.autoTrue.status === "completed"
     && demo.autoFalse.status === "completed"
     && demo.ambiguous.status === "failed"

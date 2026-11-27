@@ -27,6 +27,8 @@ assert.equal("instantiateNodePreset" in root, true);
 assert.equal("serializeNodePreset" in root, true);
 assert.equal("createEditorCatalog" in root, true);
 assert.equal("BranchNode" in root, true);
+assert.equal("FilterNode" in root, true);
+assert.equal("CombineNode" in root, true);
 assert.equal("MergeNode" in root, true);
 assert.equal("SubgraphNode" in root, true);
 assert.equal("ForEachNode" in root, true);
