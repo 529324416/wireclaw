@@ -67,12 +67,6 @@ export class ModelCallNode extends GraphNode{
                 defaultMode: "value",
             },
             {
-                name: "thinking",
-                type: "text",
-                supportedModes: ["value", "stream"],
-                defaultMode: "value",
-            },
-            {
                 name: "attachments",
                 type: "attachments",
                 supportedModes: ["value"],
@@ -82,6 +76,12 @@ export class ModelCallNode extends GraphNode{
                 name: "usage",
                 type: "json",
                 supportedModes: ["value"],
+                defaultMode: "value",
+            },
+            {
+                name: "thinking",
+                type: "text",
+                supportedModes: ["value", "stream"],
                 defaultMode: "value",
             },
         ];

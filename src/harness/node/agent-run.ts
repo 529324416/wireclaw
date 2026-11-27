@@ -73,12 +73,6 @@ export class AgentRunNode extends GraphNode{
                 defaultMode: "value",
             },
             {
-                name: "thinking",
-                type: "text",
-                supportedModes: ["value", "stream"],
-                defaultMode: "value",
-            },
-            {
                 name: "attachments",
                 type: "attachments",
                 supportedModes: ["value"],
@@ -94,6 +88,12 @@ export class AgentRunNode extends GraphNode{
                 name: "stopReason",
                 type: "text",
                 supportedModes: ["value"],
+                defaultMode: "value",
+            },
+            {
+                name: "thinking",
+                type: "text",
+                supportedModes: ["value", "stream"],
                 defaultMode: "value",
             },
         ];
