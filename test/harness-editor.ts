@@ -88,8 +88,19 @@ section("内建节点目录");
     assert.ok(catalog.nodeTypes.some((entry) => entry.type === HarnessBuiltinNodeType.ToolSet));
     assert.ok(catalog.nodeTypes.some((entry) => entry.type === HarnessBuiltinNodeType.EventTrigger));
 
+    const replace = catalog.nodeTypes.find(
+        (entry) => entry.type === HarnessBuiltinNodeType.Replace,
+    );
+    assert.ok(replace !== undefined);
+    assert.equal(replace.inputs.length, 3);
+    assert.deepEqual(
+        replace.inputs.map((port) => port.name),
+        ["raw_text", "keyword", "replacement"],
+    );
+    assert.equal(replace.outputs[0]?.type, "text");
+
     const withSchema = catalog.nodeTypes.filter((entry) => entry.configSchema !== undefined);
-    assert.equal(withSchema.length, 13);
+    assert.equal(withSchema.length, 14);
     assert.ok(catalog.nodeTypes.some((entry) => entry.type === HarnessBuiltinNodeType.Provider));
     assert.ok(catalog.nodeTypes.every((entry) => entry.category !== undefined));
     const constant = catalog.nodeTypes.find(

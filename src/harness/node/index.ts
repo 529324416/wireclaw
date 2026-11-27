@@ -17,6 +17,7 @@ import { ModelNode } from "./model";
 import { ModelCallNode } from "./model-call";
 import { OutputNode } from "./output";
 import { ProviderNode } from "./provider";
+import { ReplaceNode } from "./replace";
 import { SubgraphNode } from "./subgraph";
 import { ToolSetNode } from "./tool-set";
 import { ValueNode } from "./value";
@@ -33,6 +34,7 @@ export * from "./choice";
 export * from "./branch";
 export * from "./filter";
 export * from "./combine";
+export * from "./replace";
 export * from "./merge";
 export * from "./subgraph";
 export * from "./value";
@@ -398,6 +400,49 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         },
         defaultConfig: { separator: "" },
         create: (id, config, inputs, ui) => new CombineNode(id, config, inputs, ui),
+    });
+    registry.register({
+        type: HarnessBuiltinNodeType.Replace,
+        version: 1,
+        title: "Replace",
+        description: "按 keyword 把 raw_text 中的文本替换为 replacement",
+        builtIn: true,
+        category: "data",
+        keywords: ["replace", "替换", "文本", "keyword", "raw_text"],
+        configSchema: {
+            type: "object",
+            properties: {
+                rawText: {
+                    title: "原文",
+                    type: "string",
+                    description: "未连接 raw_text 时使用",
+                },
+                keyword: {
+                    title: "查找",
+                    type: "string",
+                    description: "未连接 keyword 时使用；空串不做替换",
+                },
+                replacement: {
+                    title: "替换为",
+                    type: "string",
+                    description: "未连接 replacement 时使用",
+                },
+                count: {
+                    title: "最大次数",
+                    type: "integer",
+                    minimum: -1,
+                    default: -1,
+                    description: "-1 表示全部，0 表示不替换，正数为上限",
+                },
+            },
+        },
+        defaultConfig: {
+            rawText: "",
+            keyword: "",
+            replacement: "",
+            count: -1,
+        },
+        create: (id, config, inputs, ui) => new ReplaceNode(id, config, inputs, ui),
     });
     registry.register({
         type: HarnessBuiltinNodeType.Merge,

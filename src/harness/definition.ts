@@ -22,6 +22,8 @@ export const HarnessBuiltinNodeType = {
     Filter: "core.filter",
     /** 把两个文本输入按顺序合并为一个文本。 */
     Combine: "core.combine",
+    /** 按 keyword 把 raw_text 中的文本替换为 replacement。 */
+    Replace: "core.replace",
     /**
      * @deprecated 旧 Merge 节点；行为等同 Filter，仅为旧图 / 旧 run 保留。
      * 新图请使用 Filter（core.filter）。
