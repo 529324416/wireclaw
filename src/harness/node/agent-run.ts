@@ -25,18 +25,24 @@ import type { SessionHostOptions } from "../../session/session";
 import { SessionEventType, SessionPermission } from "../../session/type";
 import type { SessionRuntimeOptions } from "../../session/type";
 import {
+    applyInputOverrides,
     attachmentRefs,
     buildUserContent,
     contentAttachments,
     contentToText,
     errorText,
     findLastAssistant,
+    jsonInputValue,
+    readAttachmentRefs,
     readConfig,
     readOptionalBoolean,
     readOptionalPositiveInteger,
     readOptionalString,
-    requireModelBinding,
+    readRequiredString,
+    readToolSetSpec,
     requireText,
+    resolveModelBinding,
+    textInputValue,
     usageToJson,
 } from "./helpers";
 
@@ -49,8 +55,10 @@ export class AgentRunNode extends GraphNode{
 
     override get inputs(): readonly InputPortSpec[]{
         return [
-            { name: "model", type: "model", required: true },
-            { name: "input", type: "text", required: true },
+            { name: "model", type: "model" },
+            { name: "input", type: "text" },
+            { name: "system", type: "text" },
+            { name: "hostTools", type: "json" },
             { name: "attachments", type: "attachments" },
             { name: "toolset", type: "toolset" },
         ];
@@ -95,10 +103,17 @@ export class AgentRunNode extends GraphNode{
         ctx: NodeContext,
         inputs: NodeInputValues,
     ): Promise<NodeOutputValues>{
-        const config = readConfig(this.config, this.type);
-        const binding = requireModelBinding(inputs.model);
-        const input = requireText(inputs.input, "input");
-        const attachments = attachmentRefs(inputs.attachments);
+        const config = applyInputOverrides(readConfig(this.config, this.type), inputs, {
+            system: (value) => textInputValue(value, "system"),
+            hostTools: (value) => jsonInputValue(value, "hostTools"),
+        });
+        const binding = resolveModelBinding(inputs.model, config, this.type);
+        const input = inputs.input === undefined
+            ? readRequiredString(config, "input", this.type)
+            : requireText(inputs.input, "input");
+        const attachments = inputs.attachments === undefined
+            ? readAttachmentRefs(config, this.type)
+            : attachmentRefs(inputs.attachments);
         const provider = ctx.services.resolveModel(binding);
 
         if (!isChatProvider(provider)){
@@ -133,6 +148,9 @@ export class AgentRunNode extends GraphNode{
                     );
                 }
                 specs.push(nodeToolSet.toolset);
+            } else {
+                const configToolSet = readToolSetSpec(config.toolset, this.type);
+                if (configToolSet !== undefined) specs.push(configToolSet);
             }
 
             const toolSource = ctx.services.tools === undefined

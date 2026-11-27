@@ -22,17 +22,22 @@ import type { Run } from "../../session/session";
 import { SessionEventType, SessionPermission } from "../../session/type";
 import type { SessionRuntimeOptions } from "../../session/type";
 import {
+    applyInputOverrides,
     attachmentRefs,
     buildUserContent,
     contentAttachments,
     contentToText,
     errorText,
     findLastAssistant,
+    jsonInputValue,
+    readAttachmentRefs,
     readConfig,
     readOptionalBoolean,
     readOptionalString,
-    requireModelBinding,
+    readRequiredString,
     requireText,
+    resolveModelBinding,
+    textInputValue,
     usageToJson,
 } from "./helpers";
 
@@ -45,8 +50,10 @@ export class ModelCallNode extends GraphNode{
 
     override get inputs(): readonly InputPortSpec[]{
         return [
-            { name: "model", type: "model", required: true },
-            { name: "prompt", type: "text", required: true },
+            { name: "model", type: "model" },
+            { name: "prompt", type: "text" },
+            { name: "system", type: "text" },
+            { name: "parameters", type: "json" },
             { name: "attachments", type: "attachments" },
         ];
     }
@@ -84,11 +91,18 @@ export class ModelCallNode extends GraphNode{
         ctx: NodeContext,
         inputs: NodeInputValues,
     ): Promise<NodeOutputValues>{
-        const config = readConfig(this.config, this.type);
+        const config = applyInputOverrides(readConfig(this.config, this.type), inputs, {
+            system: (value) => textInputValue(value, "system"),
+            parameters: (value) => jsonInputValue(value, "parameters"),
+        });
         const mode = readMode(config);
-        const binding = requireModelBinding(inputs.model);
-        const prompt = requireText(inputs.prompt, "prompt");
-        const refs = attachmentRefs(inputs.attachments);
+        const binding = resolveModelBinding(inputs.model, config, this.type);
+        const prompt = inputs.prompt === undefined
+            ? readRequiredString(config, "prompt", this.type)
+            : requireText(inputs.prompt, "prompt");
+        const refs = inputs.attachments === undefined
+            ? readAttachmentRefs(config, this.type)
+            : attachmentRefs(inputs.attachments);
         const systemPrompt = mode === "chat"
             ? readOptionalString(config, "system", this.type)
             : undefined;

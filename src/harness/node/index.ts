@@ -183,6 +183,21 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         configSchema: {
             type: "object",
             properties: {
+                providerId: {
+                    title: "Provider ID",
+                    type: "string",
+                    description: "未连接 Model 节点时使用；连接后以连接为准",
+                },
+                modelId: {
+                    title: "Model ID",
+                    type: "string",
+                    description: "未连接 Model 节点时使用；连接后以连接为准",
+                },
+                prompt: {
+                    title: "Prompt",
+                    type: "string",
+                    description: "未连接 prompt 输入时使用",
+                },
                 mode: {
                     title: "模式",
                     type: "string",
@@ -191,17 +206,17 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
                     default: "chat",
                 },
                 system: { title: "System Prompt", type: "string" },
-                think: { title: "启用思考", type: "boolean" },
-                thinkingLv: {
-                    title: "思考强度",
-                    type: ["string", "number"],
-                    description: "字符串或数字，由 Provider 解释",
-                },
                 temperature: {
                     title: "Temperature",
                     type: "number",
                     minimum: 0,
                     maximum: 2,
+                },
+                think: { title: "启用思考", type: "boolean" },
+                thinkingLv: {
+                    title: "思考强度",
+                    type: ["string", "number"],
+                    description: "字符串或数字，由 Provider 解释",
                 },
                 modality: {
                     title: "生成模态",
@@ -215,6 +230,12 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
                     type: "object",
                     format: "json",
                     description: "透传给 Provider.generate 的任意对象",
+                },
+                attachments: {
+                    title: "附件引用",
+                    type: "array",
+                    items: { type: "object" },
+                    description: "未连接 attachments 输入时使用；数组项为 { contentHash }",
                 },
             },
         },
@@ -232,6 +253,21 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
         configSchema: {
             type: "object",
             properties: {
+                providerId: {
+                    title: "Provider ID",
+                    type: "string",
+                    description: "未连接 Model 节点时使用；连接后以连接为准",
+                },
+                modelId: {
+                    title: "Model ID",
+                    type: "string",
+                    description: "未连接 Model 节点时使用；连接后以连接为准",
+                },
+                input: {
+                    title: "输入",
+                    type: "string",
+                    description: "未连接 input 输入时使用",
+                },
                 permission: {
                     title: "权限",
                     type: "string",
@@ -246,18 +282,30 @@ export function registerBuiltinNodes(registry: NodeTypeRegistry): void{
                     default: 8,
                 },
                 system: { title: "System Prompt", type: "string" },
-                hostTools: {
-                    title: "宿主工具",
-                    format: "json",
-                    description: "boolean，或 { askUser, viewMedia }",
-                },
-                think: { title: "启用思考", type: "boolean" },
-                thinkingLv: { title: "思考强度", type: ["string", "number"] },
                 temperature: {
                     title: "Temperature",
                     type: "number",
                     minimum: 0,
                     maximum: 2,
+                },
+                think: { title: "启用思考", type: "boolean" },
+                thinkingLv: { title: "思考强度", type: ["string", "number"] },
+                toolset: {
+                    title: "工具范围",
+                    type: "object",
+                    format: "json",
+                    description: "未连接 toolset 输入时使用；{ include, exclude, hostTools }",
+                },
+                hostTools: {
+                    title: "宿主工具",
+                    format: "json",
+                    description: "boolean，或 { askUser, viewMedia }",
+                },
+                attachments: {
+                    title: "附件引用",
+                    type: "array",
+                    items: { type: "object" },
+                    description: "未连接 attachments 输入时使用；数组项为 { contentHash }",
                 },
             },
         },

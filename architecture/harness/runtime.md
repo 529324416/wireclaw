@@ -55,6 +55,7 @@ src/harness/
 - **内建节点**：`core.input` / `core.output` / `core.constant` / `core.value` / `core.model` / `core.model.call`（A，chat/generate）/ `core.agent.run`（B）/ `core.toolset` / `core.choice` / `core.branch` / `core.merge` / `core.subgraph` / `core.foreach` / `core.loop` / `core.eventTrigger` / `core.log`。
 - **A 节点**：复用一次性 Session 调用现有附件解析与模型门禁（`maxSteps: 1`、host 工具关闭）；chat 模式把 `ASSISTANT_TOKEN` 转发为 `text` / `thinking` 流；generate 模式走 `GenerationCapability` 并落盘附件。
 - **B 节点**：复用 Session/AgentLoop，注入权限、`maxSteps` 与 `ToolSet`；审批与 `host__ask_user` 通过 `GraphHost` 回调桥接；默认不注册 host 内置工具。
+- **A/B 数据端口与本地回退（2026-11-27）**：`core.model.call` 新增 `system` / `parameters` 输入，`core.agent.run` 新增 `system` / `hostTools` 输入；`model` / `prompt` / `input` 的 `required` 移除。端口连接时覆盖同名 config 字段（`system` / `parameters` / `hostTools`），未连接时回退 config（`providerId` / `modelId` / `prompt` / `input` / `attachments` / `toolset`）；缺值在节点执行期报 `InvalidNode`，不再在解析期抛 `MissingInput`。
 - **ToolSet**：`Graph.toolSet` 是默认上限，`core.toolset` 节点产生节点级 spec，B 节点的 `toolset` 输入在 Graph 级之上进一步收窄；`ToolSet` 实现 `ToolSource`，不修改 Session。host 工具策略按 AND 合并。
 - **流式**：输入端口可声明 `mode: "stream"`；A/B 的 `text` / `thinking` 输出支持 value + stream；运行时用 `OutputChannel` 缓冲并按端口推送。`core.eventTrigger` 把流逐块发布为 `custom` 事件，`core.log` 写入宿主日志。流消费者与上游并发执行，图完成时等待流关闭。
 - **ChoiceNode**：`core.choice` 是值选择，`whenTrue` / `whenFalse` 两条上游都会执行。
